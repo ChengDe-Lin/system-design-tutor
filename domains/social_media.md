@@ -126,23 +126,22 @@ Feed Service 查詢 B 的關注列表
 - **名人/高粉絲使用者**（粉絲數 > 閾值）：Fan-out on Read
 - **讀取時**：從預計算的 Feed Cache 取得一般使用者的貼文，再即時合併名人的最新貼文
 
-```
-使用者 B 打開 Feed
-    │
-    ▼
-┌─────────────────────────────────────┐
-│           Feed Service              │
-│                                     │
-│  ┌─────────────┐ ┌───────────────┐  │
-│  │ 預計算 Feed │ │ 名人貼文查詢  │  │
-│  │ (from Cache)│ │ (on-the-fly)  │  │
-│  └──────┬──────┘ └───────┬───────┘  │
-│         │                │          │
-│         ▼                ▼          │
-│      ┌─────────────────────┐        │
-│      │   合併 + 排序/排名   │        │
-│      └─────────────────────┘        │
-└─────────────────────────────────────┘
+```mermaid
+graph TD
+    B["使用者 B 打開 Feed"] --> FS["Feed Service"]
+
+    subgraph FS_sub["Feed Service"]
+        direction TB
+        Cache["預計算 Feed<br/>(from Cache)"]
+        Celeb["名人貼文查詢<br/>(on-the-fly)"]
+        Merge["合併 + 排序/排名"]
+        Cache --> Merge
+        Celeb --> Merge
+    end
+
+    FS --> Cache
+    FS --> Celeb
+    Merge --> Result["回傳排序後的 Feed"]
 ```
 
 > **面試加分**：主動提出閾值如何決定（根據粉絲數與發文頻率的乘積）、如何動態調整。
@@ -682,6 +681,36 @@ def get_post(post_id):
 5. Feed Cache 的資料結構（Redis Sorted Set）
 6. 擴展：排名管線、即時更新、刪除貼文的處理
 
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+系統以 Post Service 接收發文、Fan-out Service 將貼文分發至粉絲的 Feed Cache（Redis Sorted Set），並由 Feed Service 在讀取時合併預計算結果與名人即時查詢，最終經 Ranking Service 排序後回傳。寫入路徑透過 Kafka 解耦，讀取路徑以快取為主保證低延遲。
+
+#### 核心元件
+- **Post Service**：驗證、儲存貼文，發送 `PostCreated` 事件至 Kafka
+- **Fan-out Service**：消費事件，依粉絲數決定推/拉策略，寫入粉絲 Feed Cache
+- **Feed Cache (Redis Sorted Set)**：以 `user:{id}:feed` 為 key，score 為 timestamp，存放貼文 ID 列表
+- **Feed Service**：讀取 Feed Cache + 即時合併名人貼文 + 呼叫 Ranking Service
+- **Ranking Service**：多階段排名管線（粗篩 → 粗排 → 精排 → 後處理）
+
+#### 關鍵決策與 Trade-off
+
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| Fan-out 策略 | Push（寫放大） | Pull（讀延遲高） | 混合：一般使用者 Push、名人 Pull |
+| 名人閾值 | 靜態（如 10K 粉絲） | 動態（粉絲數 × 發文頻率） | 動態調整，避免邊界案例 |
+| Feed 排序 | 時間序 | ML 演算法排名 | 演算法排名，但保留時間序作為 fallback |
+| 貼文刪除 | 即時從所有 Feed 移除 | 軟刪除 + 讀取時過濾 | 軟刪除，避免反向 Fan-out 成本 |
+
+#### 面試時要主動提到的點
+- 混合 Fan-out 的閾值如何動態決定（粉絲數 × 發文頻率的乘積）
+- Feed Cache 設定 TTL（如 7 天），超過後回退到 Pull 模式重建
+- 刪除貼文用軟刪除 (Soft Delete)，讀取時過濾，避免反向 Fan-out
+- 活躍度分層 Fan-out：24h 內活躍粉絲立即推、7 天內延遲推、超過 7 天不推
+
+</details>
+
 ---
 
 ### 題目二：設計 Instagram (Design Instagram)
@@ -695,6 +724,37 @@ def get_post(post_id):
 4. 探索頁面：候選生成 → 排名 → 個人化推薦
 5. 限時動態：TTL = 24 小時、環形 UI 的資料結構
 6. 擴展：圖片去重 (Perceptual Hashing)、NSFW 檢測管線
+
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+Instagram 的核心差異在於「媒體優先」——所有內容都以圖片/影片為載體。上傳路徑使用 Pre-signed URL 讓客戶端直傳 Object Storage，再透過非同步轉碼管線產生多尺寸版本並推送至 CDN。Feed 系統與 Twitter 類似採用混合 Fan-out，但更強調圖片懶載入與漸進式解碼以優化感知延遲。
+
+#### 核心元件
+- **Media Upload Service**：產生 Pre-signed URL，接收上傳完成回呼，觸發轉碼
+- **Transcoding Pipeline**：產生多種尺寸（縮圖 150px、中圖 640px、原圖 1080px）+ 格式轉換（WebP/AVIF）
+- **CDN 分層快取**：Edge PoP → Regional Cache → Origin (S3)
+- **Feed Service**：混合 Fan-out + Ranking，回傳媒體 URL 使用 CDN 域名
+- **Explore Service**：基於協同過濾 (Collaborative Filtering) + 內容特徵的候選生成與排名
+- **Stories Service**：TTL = 24 小時，使用 Ring Buffer 或 Redis ZSET + TTL 管理
+
+#### 關鍵決策與 Trade-off
+
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 上傳方式 | 經由應用伺服器 | Pre-signed URL 直傳 | 直傳，避免應用層瓶頸 |
+| 圖片格式 | 統一 JPEG | 按裝置能力回傳 WebP/AVIF | 動態格式協商（Accept header） |
+| 探索頁排名 | 全域熱門 | 個人化推薦 | 個人化為主，熱門為冷啟動 fallback |
+| Stories 儲存 | 資料庫 + TTL | Object Storage + 中繼資料 TTL | 中繼資料設 TTL，過期後媒體延遲清理 |
+
+#### 面試時要主動提到的點
+- Pre-signed URL 避免應用伺服器成為媒體上傳瓶頸
+- 漸進式圖片載入 (Progressive JPEG / BlurHash placeholder) 優化使用者感知延遲
+- 圖片去重使用感知雜湊 (Perceptual Hashing, pHash)，節省儲存與 CDN 成本
+- Stories 的環形 UI 只需載入前 N 個使用者的第一張，其餘懶載入
+
+</details>
 
 ---
 
@@ -710,6 +770,37 @@ def get_post(post_id):
 5. 使用者偏好與退訂機制
 6. 擴展：頻率限制演算法 (Token Bucket)、模板管理系統、A/B 測試投遞策略
 
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+各服務（按讚、留言、關注等）將原始事件發送至 Kafka，Notification Service 消費後依序進行去重聚合、使用者偏好過濾、頻率限制，再按優先級分配至對應通道（Push/Email/SMS/In-App）的投遞佇列。投遞結果回寫至通知資料庫供 In-App 查詢。
+
+#### 核心元件
+- **Event Ingestion (Kafka)**：統一收集所有觸發通知的事件，按 topic 分類
+- **Dedup & Aggregation Service**：Redis 時間窗口聚合（如 5 分鐘內同貼文按讚合併為一則）
+- **Preference Service**：查詢使用者通知偏好（哪些類型、哪些通道）
+- **Rate Limiter**：Token Bucket 演算法，每使用者每小時上限 N 則推播
+- **Priority Router**：P0（安全）→ P1（直接互動）→ P2（間接互動）→ P3（推薦），分別進入不同優先級佇列
+- **Channel Adapters**：APNs/FCM（Push）、SES（Email）、Twilio（SMS）的統一抽象層
+
+#### 關鍵決策與 Trade-off
+
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 聚合方式 | 固定時間窗口 | 滑動窗口 | 固定窗口實作簡單，對通知場景足夠 |
+| 佇列選型 | 單一 Kafka topic + 消費者端優先級 | 多條獨立佇列按優先級 | 多條佇列，P0 獨立確保不被低優先級阻塞 |
+| 投遞失敗處理 | 丟棄 | 指數退避重試 | 重試 + Dead Letter Queue，P0 通知需告警 |
+| 通知儲存 | 只存最近 N 天 | 全量保留 | TTL 90 天，冷資料歸檔至低成本儲存 |
+
+#### 面試時要主動提到的點
+- 去重的 key 設計：`{user_id}:{event_type}:{target_id}:{time_window}` 防止重複通知
+- 頻率限制用 Token Bucket（每使用者獨立桶），P0 安全通知繞過限制
+- 第三方通道（APNs/FCM）本身有速率限制，需要在 adapter 層做流控
+- A/B 測試通知策略：投遞時間、文案模板、頻率上限都可實驗
+
+</details>
+
 ---
 
 ### 題目四：設計 YouTube / TikTok 的影片串流平台 (Design Video Streaming)
@@ -723,6 +814,37 @@ def get_post(post_id):
 4. 推薦系統：觀看歷史 + 互動行為 → 候選生成 → 排名
 5. 觀看計數：近似計數 (HyperLogLog) vs 精確計數，防刷機制
 6. 擴展：預載策略、離線下載、版權偵測 (Content ID)
+
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+上傳路徑：客戶端分塊上傳 (Multipart Upload) 至 Object Storage，完成後觸發 DAG-based 轉碼工作流程，產生多解析度 (360p~4K) + 多編碼格式，並生成 HLS/DASH manifest 推送至 CDN。播放路徑：客戶端請求 manifest 後依頻寬自適應切換解析度，影片片段從最近的 CDN Edge PoP 取得。
+
+#### 核心元件
+- **Upload Service**：分塊上傳管理 + 斷點續傳，完成後發事件到 Kafka
+- **Transcoding Pipeline (DAG Workflow)**：使用 DAG 排程器（如 Temporal/Airflow），拆分為視訊轉碼、音訊轉碼、縮圖生成、字幕提取等並行任務
+- **Object Storage (S3/GCS)**：原始影片 + 轉碼後多版本儲存
+- **CDN 多層快取**：Edge PoP → Mid-tier Cache → Origin，熱門影片預熱至 Edge
+- **Recommendation Service**：雙塔模型候選生成 → 精排 → 多樣性控制
+- **View Counter**：寫入 Kafka → 批次聚合至資料庫，即時展示用 Redis 近似計數
+
+#### 關鍵決策與 Trade-off
+
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 轉碼時機 | 上傳後全量轉碼所有解析度 | 按需轉碼（首次請求時） | 熱門影片預轉碼、長尾按需轉碼 |
+| 串流協議 | HLS (Apple 生態) | DASH (開放標準) | 兩者都支援，或用 CMAF 統一 |
+| 觀看計數 | 精確計數（每次寫 DB） | HyperLogLog 近似 | 近似展示 + 背景精確對帳 |
+| CDN 預熱 | 全量推送 | 按熱度選擇性推送 | 選擇性推送，避免 CDN 儲存浪費 |
+
+#### 面試時要主動提到的點
+- DAG-based 轉碼允許並行處理（視訊/音訊/縮圖獨立），失敗可單獨重試
+- 自適應串流 (ABR) 的原理：manifest 列出各解析度片段 URL，客戶端依頻寬選擇
+- 觀看計數防刷：同 IP/裝置短時間重複觀看去重，配合行為分析模型識別 bot
+- 長尾影片佔儲存 80% 但流量僅 20%，可遷移至低成本儲存層 (S3 Glacier)
+
+</details>
 
 ---
 
@@ -738,6 +860,37 @@ def get_post(post_id):
 5. 群組聊天：小群組（< 100 人）用 Fan-out on Write；大群組用頻道模型 (Channel Model)
 6. 擴展：訊息搜尋 (Elasticsearch)、訊息撤回、多裝置同步
 
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+客戶端透過 WebSocket Gateway 維持長連線，Gateway 叢集後方由 Redis Pub/Sub 或 Kafka 做訊息路由。發送訊息時先寫入 Message Storage（Cassandra/HBase），再透過連線路由表找到接收者所在的 Gateway 節點推送。離線使用者的訊息暫存於持久化佇列，上線後批次同步。
+
+#### 核心元件
+- **WebSocket Gateway Cluster**：管理長連線，維護 `user_id → gateway_node + connection_id` 路由表（存於 Redis）
+- **Chat Service**：處理發送邏輯——驗證、儲存、路由、回執
+- **Message Storage (Cassandra)**：Partition Key = `conversation_id`，Clustering Key = `message_id`（時間排序）
+- **Presence Service**：心跳機制追蹤在線狀態，Redis 中存 `last_active` 時間戳
+- **Sync Service**：離線訊息同步，基於每個 conversation 的 `last_read_message_id` 做增量拉取
+- **Group Service**：維護群組成員列表，小群組 Fan-out on Write，大群組 (>100人) 用頻道模型
+
+#### 關鍵決策與 Trade-off
+
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 連線路由 | 集中式路由表 (Redis) | 一致性雜湊直連 | Redis 路由表較靈活，支援多裝置 |
+| 訊息排序 | 伺服器端全域排序 | 每個 conversation 獨立排序 | 每 conversation 獨立排序，降低協調成本 |
+| 離線同步 | Push-based（上線推送） | Pull-based（客戶端主動拉） | Pull-based + cursor，客戶端控制節奏 |
+| 群組消息 | Fan-out on Write | 頻道模型（讀取時拉取） | 小群組推、大群組拉，閾值約 100 人 |
+
+#### 面試時要主動提到的點
+- 訊息 ID 生成：Snowflake-like 全域唯一 + 時間排序，避免依賴資料庫自增
+- 投遞語義：至少一次投遞 (At-least-once) + 客戶端冪等去重（靠 message_id）
+- 多裝置同步：每個裝置維護獨立的 `sync_cursor`，拉取 cursor 之後的所有訊息
+- 端對端加密 (E2EE)：Signal Protocol，伺服器僅儲存密文，金鑰交換透過預置金鑰包 (Pre-key Bundle)
+
+</details>
+
 ---
 
 ### 題目六：設計社群媒體搜尋功能 (Design Social Media Search)
@@ -751,3 +904,33 @@ def get_post(post_id):
 4. Typeahead：Trie 結構 / Prefix 查詢、熱門搜尋快取
 5. 熱門話題 (Trending)：滑動視窗計數 (Sliding Window Counter) + 突發檢測 (Burst Detection)
 6. 擴展：多語言支援、拼寫糾錯 (Fuzzy Matching)、安全搜尋過濾
+
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+貼文/使用者資料變更透過 Kafka 觸發 Indexing Service 寫入 Elasticsearch（近即時索引，延遲 < 數秒）。搜尋請求經 Query Service 做查詢解析（分詞、同義詞擴展、拼寫糾錯），再查詢 Elasticsearch 倒排索引，結果經排名後回傳。Typeahead 獨立服務，基於 Trie + 熱門查詢快取提供前綴補全。
+
+#### 核心元件
+- **Indexing Service**：消費 Kafka 事件，將貼文/使用者/標籤寫入 Elasticsearch，支援增量更新與刪除
+- **Elasticsearch Cluster**：按搜尋對象分 index（posts、users、hashtags），各自獨立分片與副本策略
+- **Query Service**：查詢解析（分詞、同義詞擴展）→ Elasticsearch 查詢 → 二次排名（加入社交訊號）
+- **Typeahead Service**：Trie 結構存前綴，Redis 快取熱門查詢 Top-K，回應延遲目標 < 50ms
+- **Trending Service**：滑動窗口計數器（如 1 分鐘粒度 × 60 個桶），突發檢測演算法識別短時間暴增的話題
+
+#### 關鍵決策與 Trade-off
+
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 索引延遲 | 批次索引（分鐘級） | 近即時索引（秒級） | 近即時，社群搜尋對時效性要求高 |
+| 搜尋排名 | 純文字相關性 (BM25) | BM25 + 社交訊號（互動數、關係） | 混合排名，社交訊號權重高 |
+| Typeahead 儲存 | 純 Trie（記憶體） | Trie + Redis 快取 | Redis 快取 Top-K 結果，Trie 做 fallback |
+| 多語言 | 統一分詞器 | 每語言獨立分詞器 + 語言偵測 | 獨立分詞器，中日韓需 ICU/jieba 等專用工具 |
+
+#### 面試時要主動提到的點
+- 近即時索引透過 Kafka Consumer → Elasticsearch Bulk API，控制在秒級延遲
+- 搜尋排名混合文字相關性 (BM25) 與社交訊號（發文者粉絲數、互動率、與搜尋者的社交距離）
+- Trending 用滑動窗口 + 突發檢測：計算當前計數相對歷史基線的偏差倍數，超過閾值即為 trending
+- 安全搜尋過濾在索引階段標記（ML 分類器），查詢時按使用者設定過濾
+
+</details>

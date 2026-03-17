@@ -165,43 +165,15 @@ end
 
 #### 秒殺系統架構圖
 
-```
-                        ┌─────────────┐
-                        │   使用者     │
-                        └──────┬──────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │   CDN + 靜態頁面     │  ← 商品詳情頁靜態化
-                    └──────────┬──────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │   API Gateway        │  ← Rate Limit + 黑名單
-                    │   (Nginx / Kong)     │     per-user 限流
-                    └──────────┬──────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │   Flash Sale Service │  ← Local Cache 判斷是否售罄
-                    │   (Stateless)        │     已售罄 → 直接返回
-                    └──────────┬──────────┘
-                               │ 未售罄
-                    ┌──────────▼──────────┐
-                    │   Redis Cluster      │  ← Lua 原子扣減
-                    │   (庫存計數器)        │     DECR 成功 → 進入隊列
-                    └──────────┬──────────┘
-                               │ 扣減成功
-                    ┌──────────▼──────────┐
-                    │   Message Queue      │  ← 削峰填谷
-                    │   (Kafka / RocketMQ) │     控制下游消費速率
-                    └──────────┬──────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │   Order Service      │  ← 建立訂單 + DB 庫存確認
-                    │                      │     Saga 協調支付
-                    └──────────┬──────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │   Payment Service    │
-                    └─────────────────────┘
+```mermaid
+graph TD
+    A["使用者"] --> B["CDN + 靜態頁面<br/>商品詳情頁靜態化"]
+    B --> C["API Gateway (Nginx / Kong)<br/>Rate Limit + 黑名單 · per-user 限流"]
+    C --> D["Flash Sale Service (Stateless)<br/>Local Cache 判斷是否售罄 · 已售罄→直接返回"]
+    D -- "未售罄" --> E["Redis Cluster (庫存計數器)<br/>Lua 原子扣減 · DECR 成功→進入隊列"]
+    E -- "扣減成功" --> F["Message Queue (Kafka / RocketMQ)<br/>削峰填谷 · 控制下游消費速率"]
+    F --> G["Order Service<br/>建立訂單 + DB 庫存確認 · Saga 協調支付"]
+    G --> H["Payment Service"]
 ```
 
 #### 預熱策略 (Pre-warm)
@@ -714,6 +686,41 @@ Request → CDN Cache → Local Cache (JVM) → Redis → Database
 
 **關鍵追問**：「如果支付成功的回調遺失了怎麼辦？」→ 主動查詢支付狀態的 polling 機制 + 對帳系統
 
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+使用者提交訂單後，API Gateway 進行限流與身分驗證，請求進入 Order Service。Order Service 作為 Saga Orchestrator，依序協調庫存鎖定（Inventory Service）、訂單建立（DB 寫入）、支付發起（Payment Service）。整體採用非同步事件驅動，透過 Outbox Pattern 保證狀態變更與事件發送的原子性。
+
+#### 核心元件
+- **API Gateway**：限流、認證、冪等性初步檢查（order_token）
+- **Order Service (Saga Orchestrator)**：狀態機管理、流程編排、超時處理
+- **Inventory Service**：Redis 預扣減（快速路徑）+ DB CAS 最終確認
+- **Payment Service**：對接第三方支付閘道、處理回調、冪等性保證
+- **Message Queue (Kafka)**：服務間事件傳遞、削峰
+- **Delayed Queue / Scheduler**：30 分鐘未支付自動取消
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 庫存扣減方式 | DB 樂觀鎖 (CAS) | Redis 預扣減 + DB 最終確認 | 中低併發用 CAS；高併發用 Redis 雙層 |
+| Saga 編排方式 | Choreography（事件驅動） | Orchestration（中央協調） | 訂單核心路徑用 Orchestration，可視化易除錯 |
+| 事件發送原子性 | Application 直接發 Kafka | Outbox Pattern + CDC | Outbox Pattern，避免 DB 成功但 Kafka 失敗的不一致 |
+| 超時取消機制 | 定時掃表 | Delayed Message Queue | Delayed Queue 更即時；掃表作為兜底 |
+
+#### 粗略估算
+- 中型電商：~1,000 orders/min → ~17 QPS 寫入，DB 單機可承受
+- 訂單記錄 ~1KB/row → 1 億訂單 ≈ 100GB
+- 單表超過 5,000 萬行考慮按 user_id 分表
+
+#### 面試時要主動提到的點
+- 冪等性：order_token (UUID) + Redis SETNX + DB UNIQUE INDEX 三道防線
+- 支付回調遺失處理：定時 polling 支付閘道查詢狀態 + 每日對帳批次
+- 訂單狀態機不可逆轉：不能從 SHIPPED 回到 PAID，用狀態轉換表而非 if-else
+- Outbox Pattern 是保證「DB 更新 + 事件發送」原子性的業界標準做法
+
+</details>
+
 ---
 
 ### 題目 2：設計秒殺系統 (Design a Flash Sale System)
@@ -726,6 +733,45 @@ Request → CDN Cache → Local Cache (JVM) → Redis → Database
 - 數字推演：100 萬使用者搶 1,000 件商品，每層需要攔截多少流量？
 
 **關鍵追問**：「秒殺開始後 0.5 秒商品賣完，之後的請求怎麼處理？」→ Local Cache 標記售罄，不穿透到 Redis
+
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+秒殺的本質是「用多層漏斗在盡可能靠近使用者的地方攔截無效請求」。從前端 → CDN → API Gateway → Application Local Cache → Redis → Message Queue → Order Service，每一層都大量過濾，最終只有極少數有效請求到達 DB。搭配預熱策略，確保秒殺開始瞬間所有快取層已就緒。
+
+#### 核心元件
+- **前端**：按鈕 disable 防重複提交、隨機延遲 0-500ms 分散請求、驗證碼過濾機器人
+- **CDN**：靜態頁面（HTML/CSS/JS/商品圖片）從 CDN 返回，攔截 ~70% 請求
+- **API Gateway (Nginx/Kong)**：per-user rate limit (1 req/5s)、IP 黑名單、Bot 偵測
+- **Flash Sale Service (Stateless)**：JVM Local Cache 標記售罄狀態，售罄後直接返回不查 Redis
+- **Redis Cluster**：Lua Script 原子扣減 (`if stock > 0 then DECR`)，成功則產生 order_token 寫入 Queue
+- **Message Queue (Kafka/RocketMQ)**：削峰填谷，上游 50 萬 QPS → 下游 5,000 QPS 穩定消費
+- **Order Service**：冪等建單 + DB 最終庫存確認 + Saga 協調支付
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 庫存扣減位置 | 僅 DB (CAS) | Redis 預扣 + DB 最終確認 | Redis 雙層，DB 單機扛不住秒殺 QPS |
+| 售罄通知方式 | 每次查 Redis | Local Cache 標記 + broadcast 通知 | Local Cache，避免售罄後仍大量打 Redis |
+| 結果回傳方式 | 同步等待 | 非同步排隊 + 前端輪詢/WebSocket | 非同步，同步模式下游根本撐不住 |
+| 活動隔離 | 共用叢集 | 獨立部署秒殺專用服務 | 獨立部署，避免影響日常交易 |
+
+#### 粗略估算
+- 100 萬使用者搶 1,000 件商品
+- CDN 攔截 ~70% → 30 萬動態請求
+- Rate Limiter 攔截 ~80% → ~5 萬請求
+- Local Cache（售罄後）攔截 ~99% → 初期 ~1 萬穿透
+- Redis 處理 ~1 萬，成功 ~1,000
+- Queue → Order Service：1,000 筆訂單，DB 輕鬆承受
+
+#### 面試時要主動提到的點
+- 預熱時間表：T-30min 載入 Redis、T-10min 推 CDN、T-5min 載入 Local Cache、T-1min 開放頁面
+- 售罄後的處理是重中之重：Local Cache 標記 + 廣播通知所有實例，不再穿透 Redis
+- Redis 與 DB 庫存不一致時以 DB 為準，定時校正 + 監控告警
+- 秒殺服務應獨立部署，與日常交易服務隔離，避免雪崩
+
+</details>
 
 ---
 
@@ -740,6 +786,42 @@ Request → CDN Cache → Local Cache (JVM) → Redis → Database
 
 **關鍵追問**：「如果 ES 與 DB 的資料不一致怎麼辦？」→ 定期全量校正 + CDC 延遲監控 + 降級方案（直接查 DB read replica）
 
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+商品目錄寫入 MySQL（Source of Truth），透過 CDC (Debezium) 監聽 binlog 變更，經由 Kafka 同步到 Elasticsearch 建立搜尋索引。搜尋請求走 Redis Cache → Elasticsearch 的讀取路徑，熱門搜尋詞結果直接從 Cache 返回。Typeahead 使用 ES Completion Suggester 或獨立的 Trie 結構提供毫秒級自動補全。
+
+#### 核心元件
+- **MySQL / PostgreSQL**：商品目錄 Source of Truth，商品管理後台寫入
+- **Debezium (CDC)**：監聽 MySQL binlog，將商品變更事件寫入 Kafka，延遲通常 < 1 秒
+- **Kafka**：CDC 事件傳輸、解耦寫入端與索引端
+- **Elasticsearch Cluster**：全文搜尋、多維篩選 (Faceted Search)、相關性排序
+- **Redis Cache**：快取熱門搜尋詞結果（TTL 5-15 min），攔截重複查詢
+- **Search Service**：查詢改寫（同義詞擴展、拼寫糾錯）、排序策略、降級邏輯
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 同步方式 | 雙寫 (Application 同時寫 DB + ES) | CDC (Debezium binlog → Kafka → ES) | CDC，避免雙寫一致性問題與程式碼耦合 |
+| 搜尋排序 | 純文字相關性 (BM25) | BM25 + 業務權重 (銷量/評分/轉換率) | 混合排序，業務指標直接影響營收 |
+| 自動補全 | Trie (自建) | ES Completion Suggester | ES Suggester 維護成本低；超大規模再考慮獨立 Trie |
+| Cache 粒度 | 按搜尋詞快取 | 按搜尋詞 + 篩選條件組合快取 | 按搜尋詞快取高頻查詢，組合太多則只快取 Top N |
+
+#### 粗略估算
+- 商品量：500 萬件，每件 ~2KB ES document → ~10GB 索引（單節點可處理）
+- 搜尋 QPS：~50,000 讀取，ES 3-node cluster 可承受
+- 寫入 QPS：~100（商品更新），CDC 延遲 < 1s
+- 快取命中率目標 > 80%（熱門搜尋詞高度集中）
+
+#### 面試時要主動提到的點
+- 為什麼不直接查 MySQL：全文搜尋、Faceted Search、相關性排序是 ES 的核心優勢，LIKE 查詢無法勝任
+- ES 與 DB 不一致的三層防線：CDC 即時同步 + 定期全量校正（每天凌晨）+ CDC 延遲監控告警
+- 降級方案：ES 叢集不可用時，退回查 DB read replica（功能受限但可用）
+- 搜尋結果 Cache 需加 TTL 隨機抖動，避免大量 key 同時過期造成 Cache Stampede
+
+</details>
+
 ---
 
 ### 題目 4：設計購物車系統 (Design a Shopping Cart System)
@@ -752,6 +834,41 @@ Request → CDN Cache → Local Cache (JVM) → Redis → Database
 - 購物車資料的 TTL 與清理
 
 **關鍵追問**：「使用者在手機加了商品，到電腦上看不到怎麼辦？」→ 訪客車是 client-side，登入後才有跨裝置同步；或使用 device fingerprint 嘗試關聯
+
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+購物車系統分為兩條路徑：已登入使用者的購物車存在 Server-side（Redis Hash 為主存，DB 為持久化備份），訪客購物車存在 Client-side（LocalStorage）。使用者登入時觸發 Cart Merge，以 Union Merge 策略合併兩端資料。購物車頁面即時呼叫 Promotion Service 計算折扣，結帳時即時檢查庫存與最新價格。
+
+#### 核心元件
+- **Cart Service**：CRUD 操作、合併邏輯、TTL 管理
+- **Redis (Hash)**：`HSET cart:{user_id} {sku_id} {qty}`，主要儲存層，支援 EXPIRE
+- **MySQL / PostgreSQL**：購物車持久化備份（Redis 崩潰恢復用）
+- **Promotion Service**：即時計算折扣規則、優惠券適用
+- **Product Service**：提供最新價格與庫存狀態
+- **Client-side Storage**：訪客購物車使用 LocalStorage（~5MB 容量）
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 合併策略 | Server Wins（丟棄訪客車） | Union Merge（聯集，相同商品取較大數量） | Union Merge，體驗最佳且實作合理 |
+| 價格處理 | 加入時記錄快照價格 | 每次載入取最新價格 | 快照 + 結帳時比對最新價，有差異則提示使用者 |
+| 庫存預檢 | 加入購物車時檢查 | 結帳時才檢查 | 結帳時檢查；加入時鎖庫存會被惡意利用造成假性缺貨 |
+| 持久化策略 | 僅 Redis | Redis + DB 雙寫 | Redis 為主 + 非同步寫 DB，兼顧性能與持久性 |
+
+#### 粗略估算
+- 購物車平均 5 items/user，每 item ~200 bytes → 每使用者 ~1KB
+- 1,000 萬活躍使用者 → ~10GB Redis 記憶體，單機可處理
+- 購物車讀 QPS ~50,000（頁面載入）、寫 QPS ~10,000（增刪改）
+
+#### 面試時要主動提到的點
+- 加入購物車時絕對不鎖庫存，否則惡意使用者可以把所有商品加入購物車來清空庫存
+- 訪客購物車是 client-side，天生不支援跨裝置；登入後才有跨裝置同步
+- TTL 策略：已登入 90 天、訪客 30 天；每次存取重置 TTL（sliding window）
+- Cart Merge 後應顯示通知讓使用者確認合併結果，避免困惑
+
+</details>
 
 ---
 
@@ -766,6 +883,42 @@ Request → CDN Cache → Local Cache (JVM) → Redis → Database
 
 **關鍵追問**：「推薦結果如何做到毫秒級返回？」→ 預計算 + 快取；即時部分只做 re-ranking，不做全量推薦
 
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+推薦系統分為離線管線與線上服務兩部分。離線管線：使用者行為事件（瀏覽、點擊、購買）透過 Kafka 收集，Spark/Flink 批次處理產生使用者特徵與物品特徵存入 Feature Store，離線模型（Collaborative Filtering / Embedding）預計算候選集存入 Redis。線上服務：請求進入時從 Redis 取出預計算候選集，結合即時特徵（當前 session 行為）做 re-ranking，最終返回個人化推薦結果。
+
+#### 核心元件
+- **Event Collector (Kafka)**：收集使用者行為事件（瀏覽、加購、購買、停留時間）
+- **Offline Pipeline (Spark/Flink)**：批次訓練模型、產生 user/item embedding、計算相似度矩陣
+- **Feature Store (Redis / DynamoDB)**：儲存使用者特徵與物品特徵，線上服務毫秒級讀取
+- **Candidate Generation**：離線預計算 Top-N 候選集，存入 Redis
+- **Ranking Service (Online)**：即時 re-ranking，融合即時特徵（當前 session、context）
+- **AB Testing Framework**：流量分桶、多策略並行、指標追蹤（CTR、CVR、GMV）
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 推薦策略 | Collaborative Filtering (CF) | Content-based | Hybrid：CF 為主 + Content-based 補充冷啟動 |
+| 計算模式 | 全量即時推薦 | 離線預計算 + 線上 re-ranking | 離線 + re-ranking，全量即時推薦延遲不可控 |
+| 特徵儲存 | MySQL | Redis / 專用 Feature Store | Redis，線上推薦需要 < 10ms 特徵讀取延遲 |
+| 冷啟動處理 | 隨機推薦 | 基於商品屬性 + 熱銷榜單 | 新使用者用熱銷榜 + 屬性推薦；新商品用 Content-based boosting |
+
+#### 粗略估算
+- 日活 1,000 萬使用者，每人平均產生 50 個行為事件 → 5 億事件/天 → ~6,000 events/s
+- 推薦請求 QPS：~30,000（每次頁面載入觸發）
+- 候選集：每使用者預計算 Top-500，存入 Redis → ~2KB/user → ~20GB
+- re-ranking 延遲目標 < 50ms（只對 500 個候選排序）
+
+#### 面試時要主動提到的點
+- 推薦結果毫秒級返回的關鍵：離線預計算候選集 + 線上只做輕量 re-ranking
+- 冷啟動是必考追問：新使用者用熱銷榜單 + 註冊資料推斷偏好；新商品用 Content-based 特徵匹配 + 探索流量分配
+- AB Testing 不可或缺：所有策略變更必須經過 AB Test 驗證，核心指標是 CTR × CVR（不只看點擊率）
+- 推薦系統需要反饋迴路：曝光但未點擊 = 負向信號，避免推薦結果越來越窄（Filter Bubble）
+
+</details>
+
 ---
 
 ### 題目 6：設計電商庫存管理系統 (Design an Inventory Management System)
@@ -778,3 +931,41 @@ Request → CDN Cache → Local Cache (JVM) → Redis → Database
 - 庫存審計日誌 (Audit Log)：每一筆庫存變動都要有可追溯的記錄
 
 **關鍵追問**：「如果 Redis 和 DB 的庫存數字不一致怎麼辦？」→ 定時校正任務 + 監控告警 + 以 DB 為準的恢復流程
+
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+庫存管理系統採用 Redis (Hot Path) + DB (Source of Truth) 雙層架構。線上扣減請求先經 Redis 原子操作快速判定，成功後透過 Message Queue 非同步寫入 DB 做最終確認。系統支援多倉庫庫存分配，依據使用者地理位置選擇最近倉庫，並維護總庫存、可售庫存、鎖定庫存、安全庫存四個維度的分層管理。所有庫存變動寫入 Audit Log 作為可追溯記錄。
+
+#### 核心元件
+- **Inventory Service**：庫存查詢、扣減、回補的核心邏輯
+- **Redis Cluster**：庫存計數器，Lua Script 原子扣減，~100K QPS
+- **MySQL / PostgreSQL**：庫存 Source of Truth，按 warehouse_id + sku_id 分表
+- **Message Queue (Kafka)**：Redis 扣減成功後非同步通知 DB 確認
+- **Warehouse Routing Service**：根據使用者位置 + 倉庫庫存水位選擇最佳倉庫
+- **Reconciliation Job**：定時（每 5-10 分鐘）校正 Redis 與 DB 的庫存偏差
+- **Audit Log (Append-only)**：每筆庫存變動記錄（who/what/when/why），不可修改
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 扣減時機 | 下單時直接扣減 | 下單時鎖定，支付成功後扣減 | 鎖定模式，取消時回補鎖定量而非真實庫存 |
+| 多倉庫分配 | 單一倉庫模型 | 按地理位置就近分配 | 就近分配降低物流成本；缺貨時 fallback 到其他倉 |
+| Redis 與 DB 同步 | 同步寫入（雙寫） | Redis 先扣 + 非同步 DB 確認 | 非同步確認，雙寫有一致性問題且延遲高 |
+| Audit Log 儲存 | 同一 DB | 獨立的 Append-only 儲存 | 獨立儲存（如 Kafka + ClickHouse），避免影響主 DB 性能 |
+
+#### 粗略估算
+- 50 萬 SKU × 10 倉庫 = 500 萬庫存記錄，每條 ~200 bytes → ~1GB（DB 單機輕鬆）
+- 日常庫存扣減 QPS ~5,000，Redis 單機可處理
+- 秒殺高峰 ~100,000 QPS，需要 Redis Cluster
+- Audit Log：每天 ~500 萬條變動記錄 × 500 bytes → ~2.5GB/天，需定期歸檔
+
+#### 面試時要主動提到的點
+- 庫存四層模型：總庫存 = 可售庫存 + 鎖定庫存 + 安全庫存；下單鎖定 → 支付扣減 → 取消回補
+- Redis 與 DB 不一致的三道防線：異常時主動 INCR 回補 Redis + 定時校正任務 + 偏差 > 5% 告警
+- 校正任務只在非秒殺期間執行，避免校正覆寫正在進行的扣減操作
+- 多倉庫路由策略：優先就近 → 庫存充足的倉庫 → 拆單（部分商品從不同倉庫出貨，提示使用者）
+- Audit Log 是合規需求，每筆變動必須記錄操作人、操作類型、變動量、前後值
+
+</details>

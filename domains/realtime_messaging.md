@@ -391,32 +391,27 @@ User A (Gateway 1) sends message
 
 訊息的完整寫入流程：
 
-```
-┌──────┐    ┌──────────┐    ┌───────────┐    ┌───────────┐    ┌──────┐
-│Client│───▶│ Gateway  │───▶│  Message  │───▶│   Kafka   │───▶│Target│
-│  A   │    │  Server  │    │  Service  │    │  (Relay)  │    │Gatew.│
-└──────┘    └──────────┘    └─────┬─────┘    └───────────┘    └──┬───┘
-                                  │                              │
-                                  ▼                              ▼
-                           ┌───────────┐                   ┌──────┐
-                           │ Cassandra │                   │Client│
-                           │ (Persist) │                   │  B   │
-                           └───────────┘                   └──────┘
+```mermaid
+sequenceDiagram
+    participant A as Client A
+    participant GW1 as Gateway Server
+    participant MS as Message Service
+    participant K as Kafka (Relay)
+    participant C as Cassandra (Persist)
+    participant GW2 as Target Gateway
+    participant B as Client B
 
-詳細流程:
-1. Client A 透過 WebSocket 發送訊息到 Gateway
-2. Gateway 轉發到 Message Service
-3. Message Service 執行:
-   a. 驗證訊息 (權限檢查、內容過濾)
-   b. 生成 message_id (Snowflake/ULID)
-   c. 寫入 Kafka (作為 Write-Ahead Log)
-   d. 回傳 ACK 給 Client A (訊息已接收)
-4. Kafka Consumer 異步處理:
-   a. 持久化到 Cassandra
-   b. 查詢 Connection Registry 找到 Client B 的 Gateway
-   c. 推送到目標 Gateway → Client B
-   d. 若 Client B 離線 → 寫入離線佇列 + 發送推播通知
-5. Client B 收到訊息後回傳 Delivery ACK
+    A->>GW1: 1. WebSocket 發送訊息
+    GW1->>MS: 2. 轉發訊息
+    MS->>MS: 3a. 驗證 (權限檢查、內容過濾)
+    MS->>MS: 3b. 生成 message_id (Snowflake/ULID)
+    MS->>K: 3c. 寫入 Kafka (Write-Ahead Log)
+    MS-->>A: 3d. ACK (訊息已接收)
+    K->>C: 4a. 持久化到 Cassandra
+    K->>GW2: 4b-c. 查詢 Registry → 推送到目標 Gateway
+    GW2->>B: WebSocket 推送
+    B-->>GW2: 5. Delivery ACK
+    Note over K,B: 若 Client B 離線 → 寫入離線佇列 + 推播通知
 ```
 
 **為什麼先寫 Kafka 再寫 DB？**
@@ -669,6 +664,37 @@ Topic: chat-messages
 - 如何確保訊息不丟失？（At-least-once + 客戶端去重）
 - 如何支援多裝置同步？（所有裝置同步拉取，per-device connection）
 
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+客戶端透過 WebSocket 連線至無狀態的 Gateway 層，Gateway 將訊息轉發至 Message Service，由 Kafka 作為可靠的中繼層進行訊息路由與持久化。Connection Registry（Redis）記錄使用者與 Gateway 的映射，實現跨伺服器的訊息投遞。
+
+#### 核心元件
+- **WebSocket Gateway 層**：管理長連線，單機 ~50K 連線，水平擴展
+- **Message Service**：訊息驗證、ID 生成（ULID/Snowflake）、寫入 Kafka
+- **Kafka**：訊息中繼與持久化，partition by `conversation_id` 保證對話內排序
+- **Cassandra**：訊息主儲存，`conversation_id` 為 partition key，`message_id` 為 sort key
+- **Redis**：Connection Registry、離線佇列、未讀計數
+- **Push Notification Service**：離線時整合 APNS / FCM
+
+#### 關鍵決策與 Trade-off
+
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 投遞語義 | At-most-once（可能丟訊息） | At-least-once + 客戶端去重 | 選 B，聊天不容許丟訊息 |
+| 訊息路由 | Gateway 直連（低延遲） | 經 Kafka 中繼（高可靠） | 選 Kafka，解耦且當機不丟訊息 |
+| 先寫 DB or Kafka | 先寫 DB | 先寫 Kafka 再異步寫 DB | 先寫 Kafka，快速回 ACK |
+| 同步模型 | 純 Push | Push + Pull 混合 | 混合模型，在線 Push、離線轉在線 Pull |
+
+#### 面試時要主動提到的點
+- Gateway 是無狀態的，當機後客戶端重連到任意 Gateway 即可透過 `sync_request` 補齊訊息
+- 每則訊息帶全域唯一 `message_id`，客戶端根據此 ID 去重，解決 at-least-once 的重複問題
+- 多裝置場景下 Connection Registry 儲存 `user_id → [gateway_id_list]`，訊息推送到所有在線裝置
+- 樂觀更新 (Optimistic Update) 改善使用者體感延遲
+
+</details>
+
 ---
 
 ### 題目二：設計群組聊天系統（支援大群組）
@@ -683,6 +709,36 @@ Topic: chat-messages
 - 如果群組有 10 萬人，一則訊息如何高效推送？（Fan-out on Read + 通知只發活躍用戶）
 - 如何處理成員加入/退出時的訊息可見性？（加入時間戳 vs 訊息 ID 水位線）
 - @mention 功能如何實現？（獨立推送管道，即使對話靜音也推送 @mention）
+
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+在 1:1 聊天架構的基礎上，新增 Group Service 管理群組 metadata 與成員清單，核心差異在於訊息的扇出 (Fan-out) 策略需依群組規模動態切換。小群組使用寫入時扇出確保低延遲讀取，大群組/頻道使用讀取時扇出避免寫入放大。
+
+#### 核心元件
+- **Group Service**：管理群組 metadata、成員清單、權限控制（PostgreSQL 儲存）
+- **Fan-out Service**：根據群組大小決定扇出策略，小群組寫入每個成員收件匣，大群組寫入群組訊息流
+- **Message Service**：沿用 1:1 架構，新增群組訊息的分發邏輯
+- **Membership Cache（Redis）**：快取群組成員清單，避免每次扇出都查 DB
+- **Push Filtering Service**：處理靜音、@mention 過濾、推播合併
+
+#### 關鍵決策與 Trade-off
+
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 扇出策略 | Fan-out on Write（寫入快取到每人收件匣） | Fan-out on Read（訊息寫一次，讀取時拉取） | 混合：< 200 人用 Write，> 200 人用 Read |
+| 成員可見性 | 新成員可看所有歷史訊息 | 只能看加入後的訊息（水位線） | 水位線方案，記錄 `joined_at_message_id` |
+| 已讀回執 | 每則訊息記錄每人已讀 | 只記錄每人最後已讀 message_id | 用 read pointer，O(成員數) 儲存 |
+| 推播策略 | 推給所有成員 | 只推活躍用戶 + 被 @mention 的人 | 大群組只推活躍用戶，節省推播資源 |
+
+#### 面試時要主動提到的點
+- 混合扇出策略的閾值（~200 人）可根據寫入頻率動態調整
+- @mention 走獨立推送管道，即使對話靜音也能收到通知
+- 大群組已讀回執降級為「N 人已讀」而非列出具體名單，超大頻道直接關閉此功能
+- 群組成員變更時需處理 race condition：成員退出後、扇出完成前的訊息可見性
+
+</details>
 
 ---
 
@@ -699,6 +755,36 @@ Topic: chat-messages
 - 如何降低在線狀態系統的資源消耗？（分級策略：好友即時推送，群組不推送）
 - 正在輸入 (Typing Indicator) 如何實現而不壓垮系統？（UDP-like, fire-and-forget, 不持久化）
 
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+Presence 是最終一致性 (Eventual Consistency) 場景，不需要強一致性保證。客戶端每 30 秒發送心跳，伺服器端 90 秒無心跳則標記離線。狀態變更透過 Gossip Protocol 在 Gateway 節點間傳播，收斂時間 O(log N)。使用者只訂閱好友清單的在線狀態，避免全域扇出。
+
+#### 核心元件
+- **Heartbeat Handler**：接收客戶端心跳，更新 Redis 中的 TTL key
+- **Presence Store（Redis）**：`presence:{user_id} → {status, last_seen, gateway_id}`，TTL = 90s 自動過期
+- **Gossip Layer**：Gateway 節點間透過 Gossip Protocol 同步狀態變更
+- **Subscription Manager**：維護「誰訂閱了誰的狀態」的映射，基於好友關係
+- **Notification Dispatcher**：狀態變更時推送給訂閱者
+
+#### 關鍵決策與 Trade-off
+
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 狀態同步 | 中心化 Pub/Sub（Redis Pub/Sub） | Gossip Protocol（去中心化） | 小規模用 Pub/Sub，大規模用 Gossip |
+| 心跳間隔 | 短（10s，更即時） | 長（60s，省資源） | 30s，平衡準確性與資源消耗 |
+| 扇出範圍 | 推送給所有好友 | 只推送給當前開啟聊天視窗的好友 | 分級：好友清單頁全推，群組內不推 |
+| Typing Indicator | 走可靠管道 | Fire-and-forget（不保證送達、不持久化） | Fire-and-forget，3-5 秒超時自動消失 |
+
+#### 面試時要主動提到的點
+- 量化計算：1 億 DAU，假設每人每天上線 2 次，每次狀態變更扇出給 200 好友 → 400 億次推送/天 ≈ 46 萬 QPS，必須有分級策略
+- 寬限期 (Grace Period) 防止網路抖動導致狀態頻繁切換（上線→離線→上線）
+- 隱私控制在 Subscription Manager 層攔截，隱藏狀態的使用者不發送任何狀態更新
+- 大型群組中不推送在線狀態，只在使用者點開成員列表時 pull-based 查詢
+
+</details>
+
 ---
 
 ### 題目四：設計訊息搜尋功能
@@ -713,6 +799,36 @@ Topic: chat-messages
 - 索引延遲多少可以接受？（數秒即可，使用者不會發完訊息立即搜尋）
 - 如何支援模糊搜尋和中文斷詞？（CJK Analyzer, n-gram tokenizer）
 - 搜尋結果如何排序？（時間倒序 + 相關性分數）
+
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+訊息寫入 Cassandra 後，透過 Kafka Consumer 異步建立 Elasticsearch 索引。搜尋時 API Server 查詢 ES 取得 `message_id` 清單，再從 Cassandra 取得完整訊息內容回傳客戶端。索引延遲數秒完全可接受，搜尋不屬於即時性需求。
+
+#### 核心元件
+- **Index Builder（Kafka Consumer）**：消費訊息事件，建立 ES 索引文件
+- **Elasticsearch Cluster**：全文搜尋引擎，按 `user_id` 或 `conversation_id` 分片
+- **Search API Service**：接收搜尋請求，注入權限過濾條件，查詢 ES
+- **Cassandra**：根據 ES 回傳的 `message_id` 取得完整訊息
+- **Permission Filter**：搜尋前查詢使用者所屬的對話清單，作為 ES query filter
+
+#### 關鍵決策與 Trade-off
+
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 索引時機 | 即時索引（同步寫 ES） | 延遲索引（異步經 Kafka） | 延遲索引，不阻塞訊息投遞主路徑 |
+| 索引粒度 | 全量索引所有訊息 | 只索引文字訊息 | 文字 + 檔案名稱，圖片/影片不索引內容 |
+| 權限模型 | 查詢時過濾（post-filter） | 索引時寫入權限欄位（pre-filter） | Pre-filter，在 ES 文件中加入 `allowed_users` 欄位 |
+| E2E 加密 | 伺服器端搜尋（需解密） | 客戶端本地搜尋 | 加密場景只能用客戶端本地搜尋，建本地 SQLite 索引 |
+
+#### 面試時要主動提到的點
+- 中文搜尋需要 CJK Analyzer 或 ICU Tokenizer，預設英文 tokenizer 無法正確斷詞
+- 搜尋結果排序結合相關性分數 (BM25) 和時間衰減，近期訊息優先
+- ES 索引容量規劃：每日 4B 訊息 × 平均 100 bytes 索引 = ~400 GB/天，需要定期清理舊索引或用 ILM 策略
+- E2E 加密與伺服器端搜尋互斥，這是重要的產品 trade-off，面試時要主動點出
+
+</details>
 
 ---
 
@@ -729,6 +845,36 @@ Topic: chat-messages
 - 端到端加密下如何處理縮圖？（客戶端產生加密縮圖後上傳）
 - 如何處理超大檔案（1GB+）的傳輸？（Presigned URL + 分塊上傳 + 並行上傳）
 
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+媒體檔案的上傳與訊息投遞分離。客戶端先透過 Presigned URL 直接上傳檔案到 Object Storage（S3），取得檔案 URL 後再發送包含該 URL 的訊息。伺服器端異步觸發媒體處理管線（縮圖、轉檔、壓縮），完成後更新訊息 metadata 並透過 CDN 分發。
+
+#### 核心元件
+- **Upload Service**：產生 Presigned URL，記錄上傳任務，驗證檔案大小與類型
+- **Object Storage（S3）**：儲存原始檔案與處理後的衍生檔案（縮圖、不同解析度）
+- **Media Processing Pipeline**：異步處理佇列（SQS / Kafka），觸發 Lambda / Worker 進行縮圖生成、影片轉檔（FFmpeg）、圖片壓縮
+- **CDN（CloudFront）**：快取並加速媒體檔案下載，依地理位置就近服務
+- **Metadata Store（Cassandra / PostgreSQL）**：儲存檔案 URL、尺寸、MIME type、處理狀態
+
+#### 關鍵決策與 Trade-off
+
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 上傳方式 | 經由 API Server 中轉 | Presigned URL 直傳 S3 | Presigned URL，避免 API Server 成為瓶頸 |
+| 去重策略 | 不去重 | Content-hash dedup（SHA-256） | 去重，節省儲存成本，相同檔案只存一份 |
+| 縮圖生成 | 同步（上傳時立即處理） | 異步（上傳後觸發處理） | 異步，先傳 placeholder 再替換，不阻塞發送 |
+| 大檔案上傳 | 單次上傳 | 分塊上傳 + 斷點續傳 | 分塊上傳，> 5MB 就分塊，支援行動網路斷點續傳 |
+
+#### 面試時要主動提到的點
+- 訊息先發送帶 placeholder 的版本（如模糊縮圖），處理完成後 push 更新替換為正式媒體
+- Content-addressable storage：以檔案 SHA-256 hash 為 key，相同檔案只存一份
+- E2E 加密場景下縮圖必須在客戶端生成並加密後上傳，伺服器無法處理加密內容
+- CDN URL 加上 token 與過期時間，防止未授權存取；私密對話的媒體不應永久公開
+
+</details>
+
 ---
 
 ### 題目六：設計訊息推播通知系統
@@ -744,3 +890,34 @@ Topic: chat-messages
 - 一則群組訊息發給 10 萬人，如何避免推播服務過載？（限流 + 批次推送 + 只推送近期活躍使用者）
 - 使用者同時在多個裝置，只有手機應該收到推播，如何判斷？（前台裝置不推、背景裝置推）
 - 推播延遲的可接受範圍？（幾秒到幾十秒都可接受，遠低於即時訊息的要求）
+
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+Push Notification Service 作為獨立微服務，消費 Kafka 中的「需推播」事件。先經過過濾層（靜音、免打擾、前台裝置判斷），再查詢 Token Store 取得裝置 Push Token，最後透過 Provider Adapter 分別呼叫 APNS（iOS）和 FCM（Android）。支援限流與批次推送避免下游過載。
+
+#### 核心元件
+- **Push Decision Engine**：判斷是否需要推播（使用者是否在線、對話是否靜音、是否免打擾時段）
+- **Token Store（PostgreSQL / DynamoDB）**：儲存每個裝置的 Push Token、平台類型、最後活躍時間
+- **Provider Adapter**：封裝 APNS / FCM API，處理不同平台的 payload 格式與限制
+- **Rate Limiter**：限制對 APNS / FCM 的呼叫頻率，避免被平台限流
+- **Notification Coalescer**：短時間多則訊息合併為「你有 N 則未讀訊息」
+- **Dead Token Cleaner**：異步清理 APNS / FCM 回報的無效 Token
+
+#### 關鍵決策與 Trade-off
+
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 推播判斷位置 | 在 Message Service 內判斷 | 獨立 Push Service 消費事件 | 獨立服務，職責分離、可獨立擴展 |
+| 通知合併 | 每則訊息都推 | 短時間內合併（5 秒視窗） | 合併，減少推播數量且改善使用者體驗 |
+| 多裝置策略 | 推給所有裝置 | 只推給背景/離線裝置 | 只推背景裝置，前台裝置已有 WebSocket |
+| 推播內容 | 包含完整訊息內容 | 只含發送者名稱 + 「新訊息」 | 預設顯示預覽，但提供隱私設定讓使用者關閉 |
+
+#### 面試時要主動提到的點
+- Token 會過期或失效，APNS / FCM 回傳的錯誤碼（如 `Unregistered`）必須即時處理，清除無效 Token
+- 大群組推播需限流：10 萬人群組不是一次全推，而是分批（如每批 1000）+ 只推近 7 天活躍的使用者
+- 前台裝置判斷：Gateway 知道哪些裝置有活躍 WebSocket，Push Service 查詢 Connection Registry 排除前台裝置
+- APNS payload 上限 4KB，需精心控制推播內容大小，超長訊息截斷並引導使用者開啟 App
+
+</details>

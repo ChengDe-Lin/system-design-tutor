@@ -239,28 +239,22 @@ H3 有 16 個解析度級別 (resolution 0-15)。Uber 在動態定價中使用 *
 
 行程的生命週期是一個嚴謹的有限狀態機 (Finite State Machine, FSM)：
 
-```
-  ┌──────────┐    配對成功    ┌──────────┐    司機出發    ┌──────────────┐
-  │REQUESTED │──────────────>│ MATCHED  │──────────────>│DRIVER_EN_ROUTE│
-  └──────────┘               └──────────┘               └──────────────┘
-       │                          │                            │
-       │ 無可用司機/超時           │ 司機取消                    │ 抵達上車點
-       ▼                          ▼                            ▼
-  ┌──────────┐              ┌──────────┐               ┌──────────┐
-  │CANCELLED │              │CANCELLED │               │  PICKUP  │
-  │(no_match)│              │(by_driver)│              └──────────┘
-  └──────────┘              └──────────┘                     │
-                                                             │ 乘客上車，開始行程
-                                                             ▼
-                                                       ┌──────────┐
-                           乘客取消                     │ IN_RIDE  │
-                       ┌──────────────────────────────  └──────────┘
-                       ▼                                      │
-                 ┌──────────┐                                 │ 抵達目的地
-                 │CANCELLED │                                 ▼
-                 │(by_rider)│                          ┌───────────┐
-                 └──────────┘                          │ COMPLETED │
-                                                       └───────────┘
+```mermaid
+stateDiagram-v2
+    [*] --> REQUESTED
+    REQUESTED --> MATCHED : 配對成功
+    REQUESTED --> CANCELLED_NO_MATCH : 無可用司機/超時
+
+    MATCHED --> DRIVER_EN_ROUTE : 司機出發
+    MATCHED --> CANCELLED_BY_DRIVER : 司機取消
+
+    DRIVER_EN_ROUTE --> PICKUP : 抵達上車點
+
+    PICKUP --> IN_RIDE : 乘客上車，開始行程
+
+    IN_RIDE --> CANCELLED_BY_RIDER : 乘客取消
+    IN_RIDE --> COMPLETED : 抵達目的地
+    COMPLETED --> [*]
 ```
 
 **實作重點**：
@@ -728,6 +722,35 @@ Redis GEORADIUS 已經內部處理了這個問題，但如果自己實作 geohas
 
 **你應該覆蓋的核心架構**：Location Service → Matching Service → Trip Service → Notification。重點討論 in-memory geospatial index 的選擇（Geohash vs Quadtree vs H3）和配對鎖的實現。
 
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+系統以 Location Service（in-memory geospatial index）為中心，Driver App 每 3-5 秒透過 persistent connection 上報 GPS；Rider App 發出叫車請求後由 Matching Service 查詢附近可用司機、計算 ETA、排序後加鎖派單。Trip Service 以 Event Sourcing 記錄行程狀態機的每次轉換，Notification Service 負責推送派單與行程更新。
+
+#### 核心元件
+- **Location Service**：接收位置更新、維護 Redis GEO（中等規模）或自定義 in-memory grid（超大規模），提供 GEORADIUS 查詢
+- **Matching / Dispatch Service**：查詢附近司機 → 過濾（車型、評分、接單率）→ 批次 ETA 計算 → 排序派單 → 加分散式鎖防止 double-booking
+- **Trip Service**：管理行程 FSM（REQUESTED → MATCHED → DRIVER_EN_ROUTE → PICKUP → IN_RIDE → COMPLETED），Event Sourcing 持久化
+- **Kafka**：位置流的 backbone，解耦 Location Service 與下游消費者（Matching、Surge、Analytics）
+- **Notification Service**：透過 APNs/FCM 推送派單通知；WebSocket 推送司機即時位置給乘客
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 地理索引 | Geohash（簡單、天然分片） | Quadtree / H3（自適應密度） | 中等規模用 Geohash + Redis GEO；超大規模用 H3 |
+| 配對策略 | 貪心最近（低延遲） | 批次最佳化（全域最優） | 先貪心上線，再逐步引入 2 秒批次窗口 |
+| 派單鎖 | Redis SET NX（簡單、~1ms） | Actor Model（無鎖、強序列化） | 一般規模用 Redis；滴滴級別用 Actor |
+| 位置更新協定 | HTTP/2 persistent | UDP | HTTP/2 較易維運；超大規模考慮 UDP 降低 overhead |
+
+#### 面試時要主動提到的點
+- Geohash 邊界問題：查詢必須包含自身 cell + 8 個鄰居
+- 幽靈司機處理：TTL 機制 + heartbeat 狀態機，避免配對到離線司機
+- ETA-based 配對優於直線距離：river / highway / one-way 讓 Haversine 失真
+- 行程狀態的冪等性：每個 transition 帶 event_id，重複請求直接忽略
+
+</details>
+
 ---
 
 ### 題目二：設計「附近的人 / 附近的餐廳」功能 (Proximity Service)
@@ -740,6 +763,34 @@ Redis GEORADIUS 已經內部處理了這個問題，但如果自己實作 geohas
 
 **與共乘的差異**：POI (Point of Interest) 資料更新頻率低，可以使用 PostGIS + R-tree 索引 + CDN 快取。不需要 in-memory 的即時性。
 
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+與共乘系統最大的差異在於讀寫比 — POI 資料是**讀多寫少**（餐廳位置幾乎不變），因此可以大量使用快取和持久化資料庫而非 in-memory index。前端查詢經 API Gateway 到 Proximity Service，該服務查詢 PostGIS 或 Elasticsearch 並將結果按 Geohash cell 粒度快取於 Redis/CDN。
+
+#### 核心元件
+- **PostGIS (PostgreSQL)**：儲存 POI 資料，R-tree 索引支援 `ST_DWithin` 範圍查詢
+- **Elasticsearch**：適合需要全文搜尋 + 地理過濾的場景（如「附近的義大利餐廳」）
+- **Redis 快取層**：以 Geohash-6 前綴為 key 快取該 cell 的 POI 列表，TTL 數小時
+- **CDN**：靜態 POI 列表可推至邊緣節點，進一步降低延遲
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 索引 | PostGIS R-tree | Elasticsearch geo_point | 純距離查詢用 PostGIS；需全文搜尋用 ES |
+| 分片 | Geohash 前綴分片 | 業務維度（城市/國家） | 城市級分片較簡單且跨城查詢不存在 |
+| 快取粒度 | 精確查詢快取 | Geohash cell 粒度快取 | Cell 粒度命中率高，適合 POI 場景 |
+| 資料更新 | 即時同步 | 非同步（queue + 定期重建快取） | POI 變動低頻，非同步即可 |
+
+#### 面試時要主動提到的點
+- 明確區分讀寫比與共乘場景的差異，說明為何不需要 in-memory index
+- Geohash 精度選擇：搜尋半徑 3km 適合 Geohash-5 或 Geohash-6
+- 仍須處理 Geohash 邊界問題（查詢 9 宮格）
+- 考慮排序維度：距離、評分、價格、營業時間的加權排序
+
+</details>
+
 ---
 
 ### 題目三：設計動態定價系統 (Surge Pricing)
@@ -750,6 +801,35 @@ Redis GEORADIUS 已經內部處理了這個問題，但如果自己實作 geohas
 - 平滑演算法：如何避免 cell 邊界的價格跳躍
 - 回饋循環 (Feedback Loop)：surge 太高 → 乘客取消 → 需求下降 → surge 應下調（系統穩定性）
 - 公平性：如何避免特定區域被長期高定價
+
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+Surge Pricing 本質是一個即時串流聚合管線：司機位置和叫車請求分別匯入 Kafka topic，由 Flink/Kafka Streams 以滑動視窗（2-5 分鐘）統計每個 geo cell 的供給（可用司機數）與需求（叫車請求數），計算 surge multiplier 後寫入 Redis/Time-series DB，供 Ride Request Service 查價、Driver App 顯示熱力圖。
+
+#### 核心元件
+- **H3 六角形網格**：以 resolution-7（~5 km^2/cell）劃分城市，六角形所有鄰居等距，避免正方形對角線距離偏差
+- **Flink / Kafka Streams**：消費位置流和請求流，滑動視窗聚合每 cell 的 supply/demand
+- **Pricing Engine**：`surge = pricing_curve(demand / max(supply, 1))`，pricing curve 為 sigmoid 或分段函數，非線性映射
+- **Spatial Smoothing**：`surge(cell) = α × surge(cell) + (1-α) × avg(surge(neighbors))`，消除 cell 邊界價格跳躍
+- **Redis / InfluxDB**：儲存即時 surge 值，供查價 API 讀取
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 網格形狀 | 正方形 | 六角形 (H3) | H3 等距特性更適合「附近」語意 |
+| 聚合視窗 | 短（1 分鐘） | 長（5 分鐘） | 2 分鐘折衷：反映即時又不過度波動 |
+| 更新頻率 | 即時 per-event | 微批次（每 1-2 分鐘） | 微批次即可，per-event 成本過高 |
+| Pricing curve | 線性 | Sigmoid / 分段函數 | 非線性：低 ratio 不加價，高 ratio 封頂 |
+
+#### 面試時要主動提到的點
+- 空間平滑是必要的：相鄰 cell 價格跳躍會導致乘客只走 50m 就能省數倍車費
+- 回饋循環 (Feedback Loop)：surge 過高 → 需求下降 → surge 應快速下調，需設計衰減機制或 cap
+- 公平性考量：特定低收入區域不應長期被高 surge 覆蓋，可設上限或平滑策略
+- 需排除已載客/離線/拒絕中的司機，只計算真正可用的供給
+
+</details>
 
 ---
 
@@ -771,6 +851,34 @@ Redis GEORADIUS 已經內部處理了這個問題，但如果自己實作 geohas
   → 一台 Gateway 機器可處理 ~50K 連線，3 台即可
 ```
 
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+Driver App 上報位置 → Location Service → Kafka topic → Trip Tracker Service 訂閱特定司機的位置更新 → 透過 Connection Gateway（WebSocket 層）推送給正在追蹤該行程的乘客。這是一個**窄播 (narrowcast)** 模型，每個司機的位置只推送給 1-2 個訂閱者，不是廣播。
+
+#### 核心元件
+- **Connection Gateway**：獨立的 WebSocket 伺服器叢集，負責管理長連線。水平擴展，每台處理 ~50K 連線。乘客連線時註冊 `trip_id → gateway_node` 的映射到 Redis
+- **Trip Tracker Service**：消費 Kafka 位置流，根據 `trip_id → driver_id` 映射過濾出相關位置更新，查詢 Redis 找到乘客所在的 Gateway node，轉發推送
+- **Redis（連線註冊表）**：`trip_id → {gateway_node, ws_connection_id}`，乘客上線/離線時更新
+- **離線 / 重連同步**：乘客重連時，Gateway 從 Trip Service 拉取最新行程狀態 + 最新司機位置，一次性推送
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 推送協定 | WebSocket | SSE (Server-Sent Events) | WebSocket：雙向通道，也可用於乘客發送取消等指令 |
+| Fan-out 層 | Trip Tracker 直接推 | 獨立 Connection Gateway | 獨立 Gateway：解耦連線管理與業務邏輯 |
+| 位置過濾 | Gateway 訂閱全部位置流 | Trip Tracker 過濾後轉發 | Trip Tracker 過濾：Gateway 只處理連線，不碰業務 |
+| 連線狀態 | 存 in-memory | 存 Redis | Redis：Gateway node 重啟或擴縮時不遺失映射 |
+
+#### 面試時要主動提到的點
+- 這不是廣播問題：每個司機位置只推給 1-2 人，fan-out factor 極低
+- Connection Gateway 必須與業務邏輯分離，否則無法獨立擴展
+- 離線重連策略：拉取最新快照 + 差量推送，而非重送所有歷史位置
+- 行程分享連結（乘客分享給親友）只是多一個 WebSocket 訂閱者，架構不變
+
+</details>
+
 ---
 
 ### 題目五：設計共乘配對系統 (Ride Pooling / Carpooling)
@@ -783,6 +891,34 @@ Redis GEORADIUS 已經內部處理了這個問題，但如果自己實作 geohas
 - 配對複雜度：從 1-to-1 變成 N-to-1，搜尋空間爆炸
 
 **本質**：帶容量限制的車輛路徑問題 (CVRP)。精確解是 NP-hard，實務中用插入式啟發法 (Insertion Heuristic)：每次嘗試將新乘客插入現有行程的路線中，計算額外繞路成本，選擇成本最低的方案。
+
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+在標準 1-to-1 配對的基礎上，新增 Pool Matching Service：收到叫車請求後，同時評估「指派新司機」和「插入現有進行中行程」兩種方案。插入方案需計算繞路成本 (detour cost)，只有當繞路比例低於閾值（如 < 40% 額外時間）才列入候選。選擇對所有乘客總 ETA 影響最小的方案。
+
+#### 核心元件
+- **Pool Matching Service**：擴展自 Matching Service，額外維護進行中 pool 行程的路線資訊，支援「嘗試插入新乘客」的模擬計算
+- **Route Planner**：即時計算多停靠點路線（A → B' → C → B → D），需高效的多點路徑查詢（呼叫 OSRM 的 trip API）
+- **Detour Evaluator**：計算插入新乘客後每位既有乘客的額外等待時間，確保不超過承諾的 ETA 閾值
+- **Pricing Splitter**：根據各乘客的獨乘距離 vs 實際共乘距離，按比例分攤車資
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 匹配策略 | 精確求解 (CVRP) | 插入式啟發法 | 啟發法：精確解 NP-hard，實務不可行 |
+| 繞路閾值 | 寬鬆（50%） | 嚴格（20%） | 30-40% 折衷：太寬體驗差，太嚴匹配率低 |
+| 定價模型 | 按距離分攤 | 按獨乘價折扣 | 按獨乘價折扣（如 60%）較易理解 |
+| 中途插入 | 允許行程中加人 | 只在出發前配對 | 允許中途插入：提高匹配率但增加系統複雜度 |
+
+#### 面試時要主動提到的點
+- 這是 NP-hard 問題（CVRP），面試中直接說用啟發法近似求解
+- 必須保證既有乘客的 ETA 承諾不被打破，否則使用者體驗崩壞
+- 車輛容量限制：座位數和行李空間是硬約束
+- 搜尋空間從 O(N) 司機擴展到 O(N + M) （N 個空車 + M 個進行中 pool 行程），需限制候選範圍
+
+</details>
 
 ---
 
@@ -803,3 +939,32 @@ Matching 過程中需要計算多名候選司機到乘客的 ETA
 路徑查詢必須 < 50ms（使用 Contraction Hierarchies 可達 ~5ms）
 全部 ETA 計算必須在 200ms 內完成 → 平行查詢
 ```
+
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+ETA 服務分三層：底層是路網圖 (Road Graph) + Contraction Hierarchies 預處理的最短路徑引擎（OSRM）；中間層疊加即時路況權重（從司機 GPS 軌跡聚合每路段的即時車速）；最上層用 ML 模型修正系統性偏差（時間、天氣、特殊事件等特徵）。三層疊加產生最終 ETA。
+
+#### 核心元件
+- **Road Graph Store**：從 OpenStreetMap 導入的路網圖，節點 = 路口，邊 = 路段，靜態權重 = distance / speed_limit
+- **Contraction Hierarchies (CH)**：離線預處理路網圖，建立捷徑邊 (shortcut edges)，將路徑查詢從 Dijkstra 的數百毫秒降到 ~5ms
+- **Traffic Aggregator**：消費 Kafka 位置流，每 5 分鐘聚合每路段的平均車速，更新路網圖的邊權重
+- **ML Correction Service**：輸入（時間、星期、天氣、事件、歷史偏差），輸出 ETA 校正值。通常是 gradient boosting 或 neural network
+- **ETA API**：gRPC 介面，支援單點查詢和批次查詢（配對時 10 名候選平行查詢）
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 路徑演算法 | Dijkstra / A* | Contraction Hierarchies | CH：查詢 ~5ms vs Dijkstra ~500ms，配對場景必需 |
+| 路況來源 | 第三方 API (Google) | 自有 GPS 資料聚合 | 自有：無 API 限制、延遲低；初期可混合使用 |
+| ML 修正 | 離線批次訓練 | 線上即時修正 | 離線訓練 + 線上推論：模型每日更新，推論 < 10ms |
+| 稀疏路段 | 用 speed limit 預設值 | 鄰近路段外推 | 混合：有資料用即時值，無資料用歷史同時段均值 |
+
+#### 面試時要主動提到的點
+- 原始 Dijkstra 不夠快的原因：全圖搜尋，大城市路網百萬節點，延遲不可接受
+- CH 的代價：預處理需數小時，路網變動（施工封路）時需部分重建
+- 資料稀疏問題：凌晨或郊區路段可能無司機經過，需回退到歷史統計或 speed limit
+- 批次平行查詢是配對延遲的關鍵：10 名候選串行 = 50ms，平行 = ~5ms
+
+</details>

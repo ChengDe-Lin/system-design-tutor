@@ -492,34 +492,23 @@ def transition_payment(payment, new_status):
 
 一筆典型的線上支付流程：
 
-```
-┌──────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌───────────┐
-│Client│     │API Gateway│     │Payment   │     │Risk      │     │External   │
-│      │     │          │     │Service   │     │Engine    │     │PSP (Stripe│
-│      │     │          │     │          │     │          │     │/Adyen)    │
-└──┬───┘     └────┬─────┘     └────┬─────┘     └────┬─────┘     └─────┬─────┘
-   │              │                │                │                  │
-   │ POST /pay    │                │                │                  │
-   │─────────────►│                │                │                  │
-   │              │ 驗證+限流+冪等 │                │                  │
-   │              │───────────────►│                │                  │
-   │              │                │                │                  │
-   │              │                │ 風險評估        │                  │
-   │              │                │───────────────►│                  │
-   │              │                │◄───────────────│                  │
-   │              │                │ APPROVE/REJECT │                  │
-   │              │                │                │                  │
-   │              │                │ (若通過) 發送授權請求               │
-   │              │                │──────────────────────────────────►│
-   │              │                │◄──────────────────────────────────│
-   │              │                │ AUTH_SUCCESS / AUTH_FAILED        │
-   │              │                │                │                  │
-   │              │                │ 記錄帳本 (Ledger)                 │
-   │              │                │ 發布事件到 Kafka                  │
-   │              │                │                │                  │
-   │              │◄───────────────│                │                  │
-   │◄─────────────│  Response      │                │                  │
-   │              │                │                │                  │
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant AG as API Gateway
+    participant PS as Payment Service
+    participant RE as Risk Engine
+    participant PSP as External PSP<br/>(Stripe/Adyen)
+
+    C->>AG: POST /pay
+    AG->>PS: 驗證 + 限流 + 冪等
+    PS->>RE: 風險評估
+    RE-->>PS: APPROVE / REJECT
+    PS->>PSP: (若通過) 發送授權請求
+    PSP-->>PS: AUTH_SUCCESS / AUTH_FAILED
+    Note over PS: 記錄帳本 (Ledger)<br/>發布事件到 Kafka
+    PS-->>AG: Response
+    AG-->>C: Response
 ```
 
 **四階段支付流程 (Auth → Capture → Settle → Reconcile)：**
@@ -858,6 +847,40 @@ T+0 秒         T+0~數秒        T+1~數天          T+1~T+3
 - 高並發下的餘額一致性（SELECT ... FOR UPDATE 或樂觀鎖）
 - 與銀行的充值/提現流程（外部依賴的不可靠性）
 
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+系統核心由 Transfer Service 負責接收轉帳請求，透過 Ledger Service 以雙重記帳法執行原子性的帳本寫入（同一 PostgreSQL Transaction 內完成 A 扣款 + B 入帳），並透過 Wallet Service 管理錢包餘額與充值/提現流程。外部銀行互動使用 Saga 模式處理，確保失敗時能正確補償。
+
+#### 核心元件
+- **Transfer Service**：接收轉帳請求、驗證參數、檢查冪等性、協調整個轉帳流程
+- **Ledger Service**：執行雙重記帳寫入，確保每筆交易 Debit = Credit，append-only 設計
+- **Wallet Service**：管理錢包餘額快取（Redis write-through）、處理充值/提現的非同步銀行互動
+- **Notification Service**：非同步推播轉帳結果通知（最終一致性即可）
+- **Reconciliation Job**：每日對帳，比對 Ledger 餘額與快取餘額、銀行端紀錄
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 餘額一致性 | `SELECT ... FOR UPDATE`（悲觀鎖） | 樂觀鎖（version column） | 高爭用帳戶用悲觀鎖，一般帳戶用樂觀鎖 |
+| 餘額儲存 | 每次從 Ledger SUM 計算 | Materialized balance + 快取 | Materialized balance，由 Ledger 做 Source of Truth |
+| 銀行充值/提現 | 同步等待銀行回應 | 非同步 + Webhook 回呼 | 非同步，銀行回呼延遲可達 1-3 天 |
+| 內部轉帳 vs 跨行 | 統一流程 | 分開處理 | 分開：內部用單一 DB TX，跨行用 Saga |
+
+#### 粗略估算
+- 假設 1000 萬活躍用戶，每人每天平均 2 筆轉帳 → 峰值 QPS ≈ 20M / 86400 × 3（峰值倍數）≈ 700 QPS
+- 每筆轉帳產生 2 條 ledger_entries → 寫入 QPS ≈ 1400
+- 每筆 ledger_entry ≈ 200 bytes → 日增量 ≈ 40M × 200B ≈ 8 GB/天
+
+#### 面試時要主動提到的點
+- 冪等性設計：Client 產生 Idempotency Key，防止網路重試導致重複轉帳
+- 餘額檢查與扣款必須在同一個 Transaction 內（避免 TOCTOU 問題）
+- 熱點帳戶（如商家收款帳戶）需要特殊處理：可拆分子帳戶分散鎖競爭
+- 充值/提現是與外部銀行的非同步流程，必須有狀態機追蹤 + 對帳機制
+
+</details>
+
 ### 6.2 設計一個支付閘道（如 Stripe / 綠界）
 
 **核心挑戰：**
@@ -865,6 +888,41 @@ T+0 秒         T+0~數秒        T+1~數天          T+1~T+3
 - Auth → Capture → Settle → Reconcile 四階段流程
 - 冪等性設計（Merchant 的重試不會導致重複扣款）
 - 商家對帳報表（T+1 產出，需與銀行端對帳）
+
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+支付閘道作為商家與多家 PSP/銀行之間的抽象層，對外提供統一 API，對內透過 Router 根據成功率、費率、可用性動態選擇最佳支付通路。核心以狀態機管理 Auth → Capture → Settle → Reconcile 四階段生命週期，搭配 Outbox Pattern 確保事件可靠發佈。
+
+#### 核心元件
+- **Gateway API**：面向商家的統一 RESTful API，負責認證、限流、冪等性檢查
+- **Payment Router**：智慧路由引擎，依據通路成功率（滑動窗口統計）、費率、可用性做動態選擇，支援 fallback
+- **PSP Adapter Layer**：為每家 PSP（Stripe、Adyen、銀行直連）實作統一介面的 Adapter，隔離外部差異
+- **State Machine Engine**：管理交易生命週期，確保狀態轉換合法性
+- **Settlement Service**：每日批次處理清算，產出商家對帳報表
+- **Reconciliation Engine**：T+1 比對自家紀錄與 PSP/銀行的清算檔
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 路由策略 | 靜態規則（按商家配置） | 動態路由（即時成功率 + 費率優化） | 混合：商家可指定偏好，系統在偏好內做動態優化 |
+| Auth 與 Capture | 合併（一步完成） | 分離（先授權後請款） | 分離，支持飯店預授權、延遲扣款等場景 |
+| 通路故障處理 | 直接回傳失敗 | 自動 fallback 到備用通路 | 自動 fallback，但需記錄路由決策供對帳 |
+| 對帳頻率 | 每日批次 | 即時逐筆 | 每日批次為主 + 異常交易即時告警 |
+
+#### 粗略估算
+- 中型支付閘道：日交易量 500 萬筆 → 峰值 QPS ≈ 5M / 86400 × 5 ≈ 290 QPS
+- 每筆交易涉及 1 次 Auth + 1 次 Capture → 對外 PSP 呼叫峰值 ≈ 580 QPS
+- 交易紀錄 ≈ 500 bytes/筆 → 日增量 ≈ 2.5 GB，年增量 ≈ 900 GB
+
+#### 面試時要主動提到的點
+- 冪等性由商家傳入的 Idempotency Key 保證，Gateway 層做第一道檢查（Redis），DB 層做第二道
+- 通路選擇需要 Circuit Breaker：某通路連續失敗超過閾值則暫時停用
+- Auth 和 Capture 之間可能間隔數天（如飯店場景），需要設計授權過期機制
+- 商家 Webhook 回呼需要重試機制（指數退避 + 最大重試次數）
+
+</details>
 
 ### 6.3 設計一個數位錢包系統（如 Apple Pay / Line Pay）
 
@@ -874,6 +932,40 @@ T+0 秒         T+0~數秒        T+1~數天          T+1~T+3
 - 充值/提現的非同步流程（銀行轉帳可能需要 1-3 天）
 - 交易限額（每日/每月限額的原子性檢查）
 
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+數位錢包核心是一套 CQRS 架構的帳本系統：寫入路徑經過 Ledger Write Service 做雙重記帳寫入 PostgreSQL（append-only），讀取路徑透過 Balance Query Service 從 Redis 快取取得餘額。充值/提現透過 Funding Service 與銀行非同步互動，使用狀態機追蹤每筆資金流動的生命週期。
+
+#### 核心元件
+- **Ledger Service**：append-only 的雙重記帳帳本，每筆操作（消費、充值、提現、退款）都產生對應的 Debit/Credit entries
+- **Balance Service（CQRS Read Side）**：Redis write-through 快取熱門帳戶餘額，寫入帳本時同步更新快取
+- **Funding Service**：處理充值（銀行→錢包）和提現（錢包→銀行），管理與銀行的非同步互動
+- **Limit Service**：原子性檢查並更新每日/每月交易限額，使用 Redis INCRBY + EXPIREAT 實現
+- **Transaction History Service**：從 Kafka 消費 ledger events，寫入 Elasticsearch 供用戶查詢
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 餘額快取更新 | Write-through（同步寫快取） | Write-behind（非同步寫快取） | Write-through，餘額不容許延遲不一致 |
+| 限額檢查 | 在 DB Transaction 內檢查 | Redis 原子操作（INCRBY） | Redis，低延遲且支援滑動窗口；但需搭配 DB 做最終驗證 |
+| 充值確認 | 等銀行同步回應 | 先建立「處理中」狀態，等 Webhook | Webhook 非同步，銀行轉帳本質就是非同步的 |
+| 帳本分片 | 單一 PostgreSQL | 按 account_id 分片 | 初期單一 DB 足夠，當帳戶數破千萬再考慮分片 |
+
+#### 粗略估算
+- 2000 萬用戶，日活 500 萬，每人日均 3 筆消費 → 峰值 QPS ≈ 15M / 86400 × 3 ≈ 520 QPS
+- 餘額查詢遠多於消費（每次打開 App 都查餘額）→ 讀取 QPS ≈ 5000+（Redis 輕鬆應對）
+- ledger_entries 日增量 ≈ 30M × 200B ≈ 6 GB/天
+
+#### 面試時要主動提到的點
+- 充值/提現是非同步的，用戶看到「處理中」狀態是正常的，需要清楚的 UI 狀態展示
+- 餘額的 Source of Truth 永遠是 Ledger（`SUM(CREDIT) - SUM(DEBIT)`），Redis 快取只是加速層
+- 限額檢查必須在扣款之前且與扣款在同一原子操作內，否則會有 Race Condition
+- 需要設計「凍結金額」概念：授權時凍結、Capture 時實際扣款，避免超額消費
+
+</details>
+
 ### 6.4 設計一個即時風控系統（Fraud Detection）
 
 **核心挑戰：**
@@ -881,6 +973,41 @@ T+0 秒         T+0~數秒        T+1~數天          T+1~T+3
 - 規則引擎 + ML 模型的混合架構
 - 特徵計算（近 5 分鐘的交易頻率、歷史消費模式）
 - 即時串流處理（Kafka Streams / Flink）
+
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+風控系統採用雙軌並行架構：同步路徑（< 100ms）處理即時交易決策，由規則引擎（確定性規則如黑名單、速度檢查）和輕量 ML 模型（fraud score）組成；非同步路徑透過 Flink 進行串流特徵計算和深度模型分析，結果回饋到特徵儲存供同步路徑使用。兩條路徑互相補強，平衡延遲與準確度。
+
+#### 核心元件
+- **Rule Engine**：低延遲的確定性規則檢查（黑名單、白名單、地理圍欄、速度限制），規則可熱更新
+- **ML Scoring Service**：輕量模型（如 XGBoost）在線推論，回傳 fraud score（0-100）
+- **Feature Store**：Redis 儲存即時特徵（近 5 分鐘交易次數、24 小時累計金額），Flink 持續更新
+- **Stream Processor（Flink）**：消費交易事件流，計算滑動窗口特徵、偵測異常模式、更新 Feature Store
+- **Case Management Service**：高風險交易進入人工審查佇列，審查結果回饋為模型訓練資料
+- **Decision Aggregator**：綜合 Rule Engine 和 ML 分數做最終決策（APPROVE / REVIEW / REJECT）
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 即時特徵計算 | 預計算存 Redis（查詢快） | 請求時即時計算（最新） | 預計算，100ms 內無法做複雜聚合查詢 |
+| 模型部署 | 嵌入式（同進程） | 獨立 Model Serving（gRPC） | 嵌入式延遲更低，但更新需重啟；建議用 gRPC + 模型版本切換 |
+| 規則 vs ML 權重 | 規則優先（ML 輔助） | ML 優先（規則兜底） | 規則優先：黑名單直接拒絕，ML 處理灰色地帶 |
+| 假陽性處理 | 直接拒絕 | 進入人工審查 | 中高分進審查，超高分直接拒絕，降低用戶摩擦 |
+
+#### 粗略估算
+- 每筆交易需在 < 100ms 內回傳決策 → Rule Engine < 10ms、Feature Store 查詢 < 5ms、ML 推論 < 30ms
+- 支付 QPS 500 → 風控 QPS 也是 500（每筆交易都經過風控）
+- Feature Store：每個用戶約 50 個特徵 × 8 bytes ≈ 400 bytes → 1000 萬活躍用戶 ≈ 4 GB（Redis 輕鬆容納）
+
+#### 面試時要主動提到的點
+- 風控系統必須有 graceful degradation：如果 ML 服務超時，退回到規則引擎決策，絕不阻塞支付
+- 特徵的時間窗口設計（1 分鐘、5 分鐘、1 小時、24 小時）直接影響偵測效果
+- 模型需要持續用最新的欺詐案例重新訓練（feedback loop），否則會被新型攻擊繞過
+- 合規要求：風控決策必須可解釋（Explainability），純黑箱模型在金融監管下可能不被接受
+
+</details>
 
 ### 6.5 設計一個跨境匯款系統
 
@@ -890,6 +1017,42 @@ T+0 秒         T+0~數秒        T+1~數天          T+1~T+3
 - 法規合規（KYC/AML、資料駐留）
 - 中間行（Correspondent Bank）的路由選擇
 
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+跨境匯款系統將一筆匯款拆解為三個獨立交易：(1) 來源幣種扣款、(2) 匯率轉換（FX Transaction）、(3) 目標幣種入帳。每個幣種維護獨立帳本，匯率轉換本身作為一筆獨立的雙重記帳交易記錄。整體流程以 Saga 編排，因為涉及多國銀行和中間行的外部依賴。
+
+#### 核心元件
+- **Transfer Orchestrator**：Saga 協調者，編排整個跨境匯款流程（KYC 驗證 → 匯率鎖定 → 扣款 → 路由 → 入帳）
+- **Multi-currency Ledger**：每個幣種獨立帳本，匯率轉換記為「USD 帳本 Debit + TWD 帳本 Credit」，匯率作為交易 metadata
+- **FX Service**：提供即時匯率報價，支援匯率鎖定（Quote Lock，通常有效期 30 秒 ~ 15 分鐘）
+- **Corridor Router**：選擇最佳匯款路徑（直連銀行 vs 中間行），考量費率、速度、合規要求
+- **Compliance Service**：KYC/AML 檢查、制裁名單篩查（OFAC、EU Sanctions）、大額交易通報
+- **Data Residency Manager**：確保各國資料儲存在合規的地理位置
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 匯率鎖定 | 短期鎖定（30 秒） | 長期鎖定（15 分鐘） | 短期鎖定 + 過期後重新報價，降低匯率風險敞口 |
+| 帳本結構 | 單一帳本多幣種欄位 | 每幣種獨立帳本 | 獨立帳本，避免跨幣種 SUM 錯誤，每個帳本餘額獨立平衡 |
+| 中間行路由 | 固定路徑 | 動態路由（費率+速度優化） | 動態路由，但需合規白名單過濾 |
+| 資料駐留 | 中央化資料庫 | 各地區獨立部署 | 各地區獨立部署核心資料，跨區只傳輸必要的交易指令 |
+
+#### 粗略估算
+- 跨境匯款 QPS 相對低但單筆金額高：日交易量 10 萬筆 → 峰值 QPS ≈ 10
+- 每筆匯款產生 4-6 條 ledger entries（扣款 + FX + 入帳 + 手續費）→ 寫入 QPS ≈ 60
+- 端到端延遲：即時匯款 5-30 秒（如 SWIFT gpi），傳統路徑 1-5 個工作天
+- KYC/AML 檢查延遲 < 2 秒（批量篩查預計算 + 即時增量檢查）
+
+#### 面試時要主動提到的點
+- 匯率轉換必須作為獨立交易記錄，不能隱含在轉帳中，否則無法正確稽核和對帳
+- 匯率鎖定有時間窗口，過期必須重新報價，FX Service 需要管理匯率風險敞口
+- 不同國家的法規差異極大（如中國的外匯管制、歐盟的 SEPA 即時轉帳），需要可配置的合規規則引擎
+- SWIFT 報文格式（MT103 等）的解析和產生是與傳統銀行對接的關鍵技術點
+
+</details>
+
 ### 6.6 設計一個訂閱制扣款系統（Recurring Billing）
 
 **核心挑戰：**
@@ -897,3 +1060,39 @@ T+0 秒         T+0~數秒        T+1~數天          T+1~T+3
 - 扣款失敗的重試策略（Smart Retry：依據失敗原因調整重試間隔）
 - 降級處理（卡過期、餘額不足→通知用戶→寬限期→暫停服務）
 - 按比例退款（Proration）的計算邏輯
+
+<details>
+<summary>點擊查看參考思路</summary>
+
+#### 高層架構
+系統核心由 Billing Scheduler 定期掃描到期訂閱並產生扣款任務，透過 Message Queue 分發給 Billing Worker 執行。Worker 呼叫 Payment Service 完成實際扣款，失敗時依據 Smart Retry 策略安排重試。整體設計強調冪等性（每個 billing cycle + subscription ID 為一個冪等單位）和可靠性（任務持久化 + 冪等重試）。
+
+#### 核心元件
+- **Billing Scheduler**：Cron-like 排程器（建議用 DB-backed 排程避免單點故障），掃描 `subscriptions` 表中 `next_billing_date <= NOW()` 的記錄
+- **Billing Worker**：從 Queue 取得扣款任務，執行扣款邏輯，處理成功/失敗分支
+- **Smart Retry Engine**：依失敗原因分類重試策略 — 餘額不足（隔天重試）、卡過期（通知用戶更新）、暫時性錯誤（指數退避）
+- **Dunning Service**：管理扣款失敗後的催收流程 — 通知用戶 → 寬限期 → 降級 → 暫停服務 → 取消訂閱
+- **Proration Calculator**：處理升降級時的按比例計費 — 計算已使用天數的費用差額
+- **Invoice Service**：每個 billing cycle 產生正式 Invoice，作為帳務和稽核依據
+
+#### 關鍵決策與 Trade-off
+| 決策點 | 選項 A | 選項 B | 建議 |
+|--------|--------|--------|------|
+| 排程器設計 | 單一 Cron Job | DB-backed 分散式排程 | DB-backed：`SELECT ... FOR UPDATE SKIP LOCKED` 實現多 Worker 競爭 |
+| 重試策略 | 固定間隔 | Smart Retry（依失敗原因調整） | Smart Retry：卡片被拒（等用戶處理）vs 暫時性錯誤（快速重試） |
+| 扣款時機 | 精確到秒 | 批次處理（每小時一批） | 批次處理，減少對 PSP 的請求壓力，失敗批次易於重試 |
+| Proration | 按天計算 | 按秒計算 | 按天計算，足夠精確且邏輯簡單，避免爭議 |
+
+#### 粗略估算
+- 100 萬訂閱用戶，月繳為主 → 每天平均 33,000 筆扣款（100 萬 / 30 天）
+- 假設 5% 首次失敗率 → 每天約 1,650 筆需要重試
+- 扣款高峰（月初 1-3 號）可能集中 40% 的量 → 峰值日 13 萬筆 → 峰值 QPS ≈ 150（分散到 24 小時內）
+- 每筆 Invoice ≈ 1 KB → 月增量 ≈ 1 GB
+
+#### 面試時要主動提到的點
+- 冪等性的 scope 是 `subscription_id + billing_period`，同一個帳期內不論重試幾次只扣一次
+- 扣款失敗不應立即取消訂閱，業界標準是 3-7 天寬限期 + 多次重試（通常 3-5 次）
+- Smart Retry 的核心：decline code 分類 — hard decline（卡被盜、帳號關閉 → 不重試）vs soft decline（餘額不足 → 隔天重試）
+- 升降級的 Proration 要考慮：用戶在 billing cycle 中段升級時，需退還舊方案未使用天數的費用，並收取新方案剩餘天數的費用
+
+</details>

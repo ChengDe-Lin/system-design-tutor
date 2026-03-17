@@ -522,6 +522,79 @@ ul, ol { list-style: none; padding: 0; }
   font-size: inherit;
 }
 
+/* ─── Collapsible Answer Blocks ─── */
+.article-content details {
+  margin: 1.5em 0;
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  background: var(--bg-base);
+}
+
+.article-content details > summary {
+  padding: 14px 20px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.875rem;
+  color: var(--accent);
+  list-style: none;
+  transition: background 0.15s;
+  user-select: none;
+}
+
+.article-content details > summary:hover { background: var(--bg-elevated); }
+.article-content details > summary::-webkit-details-marker { display: none; }
+.article-content details > summary::marker { content: ''; }
+
+.article-content details > summary::before {
+  content: '▸ ';
+  display: inline-block;
+  transition: transform 0.2s ease;
+  margin-right: 6px;
+}
+
+.article-content details[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.article-content details[open] > summary {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.article-content details > :not(summary) {
+  margin-left: 20px;
+  margin-right: 20px;
+}
+
+.article-content details > :not(summary):first-of-type {
+  margin-top: 16px;
+}
+
+.article-content details > :last-child {
+  margin-bottom: 16px;
+}
+
+/* Fix tables inside details */
+.article-content details > .table-wrapper {
+  margin-left: 12px;
+  margin-right: 12px;
+}
+
+/* ─── Mermaid Diagrams ─── */
+.mermaid-diagram {
+  margin: 1.75em 0;
+  padding: 28px 20px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  text-align: center;
+  overflow-x: auto;
+}
+
+.mermaid-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+
 /* ═══════════════════
    Table of Contents
    ═══════════════════ */
