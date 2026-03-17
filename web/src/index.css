@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', sans-serif;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 3px;
+}
+
+/* Table enhancements for dark mode */
+.prose thead th {
+  background-color: rgba(30, 41, 59, 0.8);
+}
+.prose tbody tr:nth-child(even) {
+  background-color: rgba(30, 41, 59, 0.3);
+}
+.prose tbody tr:hover {
+  background-color: rgba(51, 65, 85, 0.4);
+}
+.prose table {
+  display: block;
+  overflow-x: auto;
+  font-size: 0.875rem;
+}
+
+/* Code block enhancements */
+.prose pre {
+  background-color: #020617 !important;
+  border: 1px solid #334155;
+}
+.prose :not(pre) > code {
+  color: #34d399 !important;
+  background-color: rgba(30, 41, 59, 0.6) !important;
+  padding: 0.15em 0.4em !important;
+  border-radius: 0.25rem !important;
+  font-size: 0.875em !important;
+}
+.prose pre code {
+  color: #cbd5e1 !important;
+  background-color: transparent !important;
+}
