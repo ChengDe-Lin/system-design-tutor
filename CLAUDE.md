@@ -27,24 +27,25 @@ system-design-tutor/
 └── web/                               # Review website (Vite + React + Tailwind)
 ```
 
-## Workflows
+## Workflows (Automatic — user does NOT need to invoke slash commands)
 
-### When the user asks a technical question:
-1. Give a clear, direct answer.
-2. If relevant, ask 1-2 follow-up questions to deepen understanding.
-3. If a misconception is detected, record it in `assessments/confusion_ledger.md`.
+Slash commands (`/project:trade-off`, `/project:confusion`, `/project:organize`) exist as explicit triggers, but you MUST also do these things **proactively** during normal conversation:
 
-### When comparing technologies (use `/project:trade-off`):
-1. Generate a structured comparison table saved to `components/<topic>.md`.
-2. Include: comparison matrix, implementation details, decision tree.
+### Auto: Confusion Tracking
+- Whenever you detect a misconception, uncertainty, or knowledge gap in the user's message, **automatically** append it to `assessments/confusion_ledger.md` at the end of your response.
+- Don't ask for permission. Just do it and mention what you recorded.
 
-### When the user says "幫我複習" or "review" (use `/project:confusion`):
-1. Show the current confusion ledger.
-2. Ask targeted questions about previously recorded blind spots.
+### Auto: Trade-off Comparison
+- When a discussion involves comparing 2+ technologies, **automatically** create or update the relevant file in `components/<topic>.md`.
+- Follow the standard format: comparison matrix, implementation details, decision tree, common pitfalls.
 
-### When the user says "幫我整理" (use `/project:organize`):
-1. Organize the current discussion into a structured note.
-2. Save to `deep_dives/<topic>.md`.
+### Auto: Organize Notes
+- When a discussion is substantial (>3 exchanges on the same topic), **offer** to organize it into `deep_dives/<topic>.md`.
+- When the user says "幫我整理", do it immediately.
+
+### When the user says "幫我複習" or "review":
+1. Show the current confusion ledger entries.
+2. Pick 2-3 entries and ask targeted questions to check retention.
 
 ## Rules of Engagement
 
