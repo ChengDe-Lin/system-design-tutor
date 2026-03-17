@@ -25,6 +25,8 @@
   --accent-blue-dim: rgba(122, 162, 247, 0.10);
   --accent-green: #73daca;
   --accent-green-dim: rgba(115, 218, 202, 0.10);
+  --accent-orange: #e0af68;
+  --accent-orange-dim: rgba(224, 175, 104, 0.10);
 
   --font-display: 'Instrument Serif', 'Noto Serif TC', Georgia, serif;
   --font-body: 'Plus Jakarta Sans', 'Noto Sans TC', -apple-system, sans-serif;
@@ -214,7 +216,7 @@ ul, ol { list-style: none; padding: 0; }
 
 .home-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 20px;
 }
 

@@ -39,6 +39,12 @@ const deepDiveMds = import.meta.glob('../../deep_dives/*.md', {
   eager: true,
 }) as Record<string, string>
 
+const domainMds = import.meta.glob('../../domains/*.md', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+}) as Record<string, string>
+
 const assessmentMds = import.meta.glob('../../assessments/*.md', {
   query: '?raw',
   import: 'default',
@@ -148,6 +154,13 @@ export default function App() {
         description: 'Trade-off comparisons',
         color: 'var(--accent)',
         files: parseFiles(componentMds),
+      },
+      {
+        key: 'domains',
+        title: 'Domains',
+        description: 'Industry-specific patterns',
+        color: 'var(--accent-orange)',
+        files: parseFiles(domainMds),
       },
       {
         key: 'deep_dives',
