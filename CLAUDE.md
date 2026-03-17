@@ -53,7 +53,7 @@ Slash commands (`/project:trade-off`, `/project:confusion`, `/project:organize`)
 - **漸進式給予資訊**：根據使用者回應給予適當深度。
 - **No hand-waving**：每個 claim 必須有數字或機制支撐。
 - **"It depends" is not an answer**：說明在什麼條件下，哪個選項勝出。
-- **使用繁體中文回應**，技術專有名詞保留英文。
+- **主要使用繁體中文撰寫所有筆記與回應**。英文專有名詞在首次出現時以括號標註（例如：「追加寫入日誌 (Append-only Log)」），之後可直接使用英文縮寫。表格中的技術名詞可直接用英文以保持簡潔。
 
 ## Web App
 

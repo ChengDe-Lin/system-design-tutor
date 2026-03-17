@@ -1,6 +1,9 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import type { Components } from 'react-markdown'
+
+// ─── Types ───
 
 interface FileEntry {
   path: string
@@ -12,8 +15,17 @@ interface Section {
   key: string
   title: string
   description: string
+  color: string
   files: FileEntry[]
 }
+
+interface Heading {
+  level: number
+  text: string
+  id: string
+}
+
+// ─── Markdown Imports ───
 
 const componentMds = import.meta.glob('../../components/*.md', {
   query: '?raw',
@@ -33,6 +45,8 @@ const assessmentMds = import.meta.glob('../../assessments/*.md', {
   eager: true,
 }) as Record<string, string>
 
+// ─── Helpers ───
+
 function toDisplayName(path: string): string {
   const fileName = path.split('/').pop()?.replace('.md', '') || ''
   return fileName
@@ -47,8 +61,84 @@ function parseFiles(mds: Record<string, string>): FileEntry[] {
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .trim()
+}
+
+function extractHeadings(markdown: string): Heading[] {
+  const regex = /^(#{1,3})\s+(.+)$/gm
+  const headings: Heading[] = []
+  let match
+  while ((match = regex.exec(markdown)) !== null) {
+    const text = match[2]
+      .replace(/\*\*/g, '')
+      .replace(/`/g, '')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    headings.push({ level: match[1].length, text, id: slugify(text) })
+  }
+  return headings
+}
+
+function getTextContent(node: React.ReactNode): string {
+  if (typeof node === 'string') return node
+  if (typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(getTextContent).join('')
+  if (node && typeof node === 'object' && 'props' in node) {
+    return getTextContent((node as any).props.children)
+  }
+  return ''
+}
+
+// ─── Table of Contents ───
+
+function TableOfContents({
+  headings,
+  activeId,
+}: {
+  headings: Heading[]
+  activeId: string
+}) {
+  const filtered = headings.filter((h) => h.level <= 3)
+  if (filtered.length === 0) return null
+
+  return (
+    <div className="toc">
+      <h3 className="toc-title">On This Page</h3>
+      <ul className="toc-list">
+        {filtered.map((h, i) => (
+          <li key={`${h.id}-${i}`}>
+            <a
+              href={`#${h.id}`}
+              onClick={(e) => {
+                e.preventDefault()
+                document
+                  .getElementById(h.id)
+                  ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              }}
+              className={`toc-link toc-level-${h.level} ${
+                activeId === h.id ? 'toc-active' : ''
+              }`}
+            >
+              {h.text}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+// ─── App ───
+
 export default function App() {
   const [selected, setSelected] = useState<FileEntry | null>(null)
+  const [activeHeadingId, setActiveHeadingId] = useState('')
+  const mainRef = useRef<HTMLElement>(null)
 
   const sections: Section[] = useMemo(
     () => [
@@ -56,68 +146,133 @@ export default function App() {
         key: 'components',
         title: 'Components',
         description: 'Trade-off comparisons',
+        color: 'var(--accent)',
         files: parseFiles(componentMds),
       },
       {
         key: 'deep_dives',
         title: 'Deep Dives',
         description: 'Architecture case studies',
+        color: 'var(--accent-blue)',
         files: parseFiles(deepDiveMds),
       },
       {
         key: 'assessments',
         title: 'Assessments',
         description: 'Blind spot tracking',
+        color: 'var(--accent-green)',
         files: parseFiles(assessmentMds),
       },
     ],
     [],
   )
 
-  const allFiles = sections.flatMap((s) => s.files)
+  const allFiles = useMemo(() => sections.flatMap((s) => s.files), [sections])
+
+  const headings = useMemo(
+    () => (selected ? extractHeadings(selected.content) : []),
+    [selected],
+  )
+
+  useEffect(() => {
+    if (!selected || headings.length === 0) return
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.find((e) => e.isIntersecting)
+        if (visible) setActiveHeadingId(visible.target.id)
+      },
+      { rootMargin: '-60px 0px -75% 0px', root: mainRef.current },
+    )
+
+    const timer = setTimeout(() => {
+      headings.forEach(({ id }) => {
+        const el = document.getElementById(id)
+        if (el) observer.observe(el)
+      })
+    }, 80)
+
+    return () => {
+      clearTimeout(timer)
+      observer.disconnect()
+    }
+  }, [selected, headings])
+
+  useEffect(() => {
+    mainRef.current?.scrollTo({ top: 0 })
+    setActiveHeadingId('')
+  }, [selected])
+
+  const mdComponents: Components = useMemo(
+    () => ({
+      h1: ({ children, ...props }: any) => (
+        <h1 id={slugify(getTextContent(children))} {...props}>
+          {children}
+        </h1>
+      ),
+      h2: ({ children, ...props }: any) => (
+        <h2 id={slugify(getTextContent(children))} {...props}>
+          {children}
+        </h2>
+      ),
+      h3: ({ children, ...props }: any) => (
+        <h3 id={slugify(getTextContent(children))} {...props}>
+          {children}
+        </h3>
+      ),
+      table: ({ children, ...props }: any) => (
+        <div className="table-wrapper">
+          <table {...props}>{children}</table>
+        </div>
+      ),
+    }),
+    [],
+  )
+
+  const handleSelect = useCallback((file: FileEntry) => {
+    setSelected(file)
+  }, [])
 
   return (
-    <div className="flex h-screen bg-slate-900 text-slate-200">
-      {/* Sidebar */}
-      <aside className="w-72 bg-slate-800/60 border-r border-slate-700/50 flex flex-col shrink-0">
-        <div className="p-5 border-b border-slate-700/50">
+    <div className="app-layout">
+      <aside className="sidebar">
+        <div className="sidebar-header">
           <button
             onClick={() => setSelected(null)}
-            className="text-left w-full"
+            className="sidebar-title-btn"
           >
-            <h1 className="text-base font-bold text-white tracking-tight">
-              System Design Tutor
-            </h1>
-            <p className="text-[11px] text-slate-500 mt-0.5">
-              {allFiles.length} notes
-            </p>
+            <span className="sidebar-title">System Design</span>
+            <span className="sidebar-subtitle">Tutor</span>
           </button>
+          <span className="sidebar-count">{allFiles.length} notes</span>
         </div>
 
-        <nav className="flex-1 overflow-auto p-3 space-y-6">
+        <nav className="sidebar-nav">
           {sections.map((s) => (
-            <div key={s.key}>
-              <h2 className="text-[11px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5 px-2">
-                {s.title}
-              </h2>
-              <p className="text-[10px] text-slate-600 px-2 mb-2">
-                {s.description}
-              </p>
+            <div key={s.key} className="sidebar-section">
+              <div className="sidebar-section-header">
+                <span
+                  className="sidebar-dot"
+                  style={{ background: s.color, color: s.color }}
+                />
+                <span className="sidebar-section-title">{s.title}</span>
+              </div>
               {s.files.length === 0 ? (
-                <p className="text-xs text-slate-600 italic px-2">
-                  No notes yet
-                </p>
+                <p className="sidebar-empty">No notes yet</p>
               ) : (
-                <ul className="space-y-0.5">
+                <ul>
                   {s.files.map((f) => (
                     <li key={f.path}>
                       <button
-                        onClick={() => setSelected(f)}
-                        className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-all duration-150 ${
-                          selected?.path === f.path
-                            ? 'bg-blue-500/15 text-blue-400 font-medium shadow-sm shadow-blue-500/5'
-                            : 'text-slate-400 hover:bg-slate-700/50 hover:text-slate-200'
+                        onClick={() => handleSelect(f)}
+                        className={`sidebar-item ${
+                          selected?.path === f.path ? 'sidebar-item-active' : ''
                         }`}
+                        style={
+                          selected?.path === f.path
+                            ? ({ borderLeftColor: s.color } as any)
+                            : undefined
+                        }
                       >
                         {f.name}
                       </button>
@@ -130,58 +285,75 @@ export default function App() {
         </nav>
       </aside>
 
-      {/* Main Content */}
-      <main className="flex-1 overflow-auto">
+      <main className="main-content" ref={mainRef}>
         {selected ? (
-          <div className="max-w-5xl mx-auto px-10 py-8">
-            {/* Breadcrumb */}
-            <div className="flex items-center gap-2 mb-8 text-xs text-slate-500">
-              <button
-                onClick={() => setSelected(null)}
-                className="hover:text-slate-300 transition-colors"
-              >
-                Home
-              </button>
-              <span className="text-slate-700">/</span>
-              <span className="text-slate-400">{selected.name}</span>
+          <div className="article-layout">
+            <div className="article-container">
+              <div className="breadcrumb">
+                <button
+                  onClick={() => setSelected(null)}
+                  className="breadcrumb-home"
+                >
+                  Home
+                </button>
+                <span className="breadcrumb-sep">/</span>
+                <span className="breadcrumb-current">{selected.name}</span>
+              </div>
+              <article className="article-content">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={mdComponents}
+                >
+                  {selected.content}
+                </ReactMarkdown>
+              </article>
             </div>
-
-            {/* Article */}
-            <article className="prose prose-invert prose-slate max-w-none prose-headings:font-bold prose-h1:text-3xl prose-h1:border-b prose-h1:border-slate-700 prose-h1:pb-3 prose-h2:text-2xl prose-h2:mt-10 prose-h3:text-xl prose-td:text-slate-300 prose-th:text-slate-200 prose-strong:text-slate-100 prose-a:text-blue-400 prose-blockquote:border-blue-500 prose-blockquote:text-slate-400 prose-hr:border-slate-700">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {selected.content}
-              </ReactMarkdown>
-            </article>
+            <TableOfContents headings={headings} activeId={activeHeadingId} />
           </div>
         ) : (
-          <div className="flex items-center justify-center h-full">
-            <div className="text-center max-w-lg px-6">
-              <h2 className="text-2xl font-bold text-slate-300 mb-3">
-                System Design Tutor
-              </h2>
-              <p className="text-slate-500 text-sm leading-relaxed mb-10">
-                Select a note from the sidebar to start reviewing. Notes are
-                organized into Components, Deep Dives, and Assessments.
+          <div className="home">
+            <div className="home-header">
+              <h1 className="home-title">
+                System Design{' '}
+                <span className="home-title-accent">Tutor</span>
+              </h1>
+              <p className="home-desc">
+                Your personal knowledge base for mastering distributed system
+                design.
               </p>
-
-              {allFiles.length > 0 && (
-                <div>
-                  <p className="text-[11px] text-slate-600 uppercase tracking-widest mb-3">
-                    All Notes
-                  </p>
-                  <div className="flex flex-wrap gap-2 justify-center">
-                    {allFiles.map((f) => (
-                      <button
-                        key={f.path}
-                        onClick={() => setSelected(f)}
-                        className="px-4 py-2 rounded-lg bg-slate-800/80 text-slate-400 text-sm hover:bg-slate-700 hover:text-slate-200 transition-all border border-slate-700/50"
-                      >
-                        {f.name}
-                      </button>
-                    ))}
+            </div>
+            <div className="home-grid">
+              {sections.map((s) => (
+                <div key={s.key} className="home-card">
+                  <div
+                    className="home-card-accent"
+                    style={{ background: s.color }}
+                  />
+                  <div className="home-card-header">
+                    <h2 className="home-card-title">{s.title}</h2>
+                    <span className="home-card-count">{s.files.length}</span>
                   </div>
+                  <p className="home-card-desc">{s.description}</p>
+                  {s.files.length > 0 ? (
+                    <ul className="home-card-list">
+                      {s.files.map((f) => (
+                        <li key={f.path}>
+                          <button
+                            onClick={() => handleSelect(f)}
+                            className="home-card-link"
+                          >
+                            {f.name}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="home-card-empty">
+                      No notes yet. Start a discussion to generate content.
+                    </p>
+                  )}
                 </div>
-              )}
+              ))}
             </div>
           </div>
         )}
