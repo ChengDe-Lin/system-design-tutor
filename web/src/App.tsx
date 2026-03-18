@@ -88,10 +88,24 @@ function toDisplayName(path: string): string {
     .join(' ')
 }
 
-function parseFiles(mds: Record<string, string>): FileEntry[] {
-  return Object.entries(mds)
-    .map(([path, content]) => ({ path, name: toDisplayName(path), content }))
-    .sort((a, b) => a.name.localeCompare(b.name))
+function parseFiles(
+  mds: Record<string, string>,
+  order?: string[],
+): FileEntry[] {
+  const entries = Object.entries(mds).map(([path, content]) => ({
+    path,
+    name: toDisplayName(path),
+    content,
+  }))
+  if (order) {
+    const orderMap = new Map(order.map((name, i) => [name.toLowerCase(), i]))
+    return entries.sort((a, b) => {
+      const ai = orderMap.get(a.name.toLowerCase()) ?? 999
+      const bi = orderMap.get(b.name.toLowerCase()) ?? 999
+      return ai - bi
+    })
+  }
+  return entries.sort((a, b) => a.name.localeCompare(b.name))
 }
 
 function slugify(text: string): string {
@@ -173,6 +187,20 @@ export default function App() {
   const [activeHeadingId, setActiveHeadingId] = useState('')
   const mainRef = useRef<HTMLElement>(null)
 
+  // Recommended reading order: fundamentals → building blocks → resilience
+  const componentOrder = [
+    'Networking',
+    'Database',
+    'Cache',
+    'Scalability',
+    'Load Balancer',
+    'Message Queue',
+    'Api Design',
+    'Rate Limiter',
+    'Fault Tolerance',
+    'Consistency And Consensus',
+  ]
+
   const sections: Section[] = useMemo(
     () => [
       {
@@ -180,7 +208,7 @@ export default function App() {
         title: 'Components',
         description: 'Trade-off comparisons',
         color: 'var(--accent)',
-        files: parseFiles(componentMds),
+        files: parseFiles(componentMds, componentOrder),
       },
       {
         key: 'domains',
