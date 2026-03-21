@@ -299,7 +299,117 @@ Server --> WebSocket --> {"type": "next", "payload": {"data": {"orderStatusChang
 
 ---
 
-### Real-time Communication: WebSocket vs Server-Sent Events (SSE)
+### Real-time & Async Communication Patterns 完整比較
+
+在 request-response 之外，還有多種 server → client 或 server → server 的通訊模式。面試中常被問到「為什麼不用 polling？」「WebSocket 和 SSE 怎麼選？」「Webhook 是什麼？」——以下是完整比較。
+
+#### 通訊模式總覽
+
+```
+Short Polling:    Client --[request]--> Server --[response]--> Client  (重複)
+Long Polling:     Client --[request]--> Server ......(等待)...... --[response]--> Client  (重複)
+SSE:              Client --[request]--> Server ===[持續推送事件]===> Client
+WebSocket:        Client <==[全雙工持續通訊]==> Server
+Webhook:          Server A --[HTTP POST callback]--> Server B  (事件驅動)
+```
+
+| Dimension | Short Polling | Long Polling | SSE | WebSocket | Webhook |
+|-----------|--------------|-------------|-----|-----------|---------|
+| **方向** | Client → Server | Client → Server | Server → Client | 雙向 | Server → Server |
+| **連線模式** | 每次新 HTTP request | HTTP request hold 到有資料 | 單一長 HTTP connection | 持久 TCP connection (HTTP Upgrade) | 事件觸發的 HTTP POST |
+| **延遲** | Polling interval (1-30s) | **接近即時** (有資料立即回) | **即時** | **即時** | **接近即時** (事件觸發後發送) |
+| **Server 資源** | 低 (stateless) | 中 (hold connections) | 中 (hold connections) | 高 (stateful connections) | 最低 (fire-and-forget) |
+| **Client 資源** | 高 (持續發 request) | 中 | 低 | 低 | N/A (server-to-server) |
+| **Scalability** | 最簡單 | 中 (需管理 held connections) | 中 | 最難 (sticky sessions, pub/sub) | 最簡單 |
+| **瀏覽器支援** | 完全 (就是 HTTP) | 完全 (就是 HTTP) | 原生 EventSource API | 原生 WebSocket API | N/A |
+| **穿透 Proxy/FW** | 完全 | 完全 | 完全 (HTTP) | 可能被阻擋 (Upgrade) | 完全 |
+| **斷線重連** | 天然 (每次新 request) | 天然 | **自動** (EventSource) | **需自己實作** | N/A (HTTP request) |
+| **典型場景** | 低頻檢查 (email inbox) | 相容性優先的即時通知 | Dashboard、通知、LLM streaming | 聊天、遊戲、協作編輯 | 支付回調、CI/CD、第三方整合 |
+
+#### Short Polling
+
+最簡單也最浪費的方式：client 每隔 N 秒發一次 request 詢問「有新資料嗎？」
+
+```
+Client                          Server
+  │── GET /messages?since=100 ──→ │
+  │←── 200 OK, [] (沒有新訊息) ──│     ← 白跑一趟
+  │                               │
+  │  ... (等 5 秒) ...            │
+  │                               │
+  │── GET /messages?since=100 ──→ │
+  │←── 200 OK, [] (還是沒有) ────│     ← 又白跑一趟
+  │                               │
+  │  ... (等 5 秒) ...            │
+  │                               │
+  │── GET /messages?since=100 ──→ │
+  │←── 200 OK, [{id:101, ...}] ──│     ← 終於有了，但等了 0-5 秒
+```
+
+**問題：** 90%+ 的 request 回傳空結果。如果有 10 萬個 client 每 5 秒 poll 一次 = 20K QPS，其中 18K 是浪費的。
+
+**唯一適用場景：** 更新頻率非常低、client 數量少、且你完全不想處理長連線的管理（例如：每 30 秒檢查一次部署狀態）。
+
+#### Long Polling
+
+Short polling 的改良版：server 收到 request 後**不立即回應**，而是 hold 住 connection 直到有新資料或 timeout。
+
+```
+Client                          Server
+  │── GET /messages?since=100 ──→ │
+  │                               │  ← Server hold 住，不回應
+  │   ... (等待 25 秒) ...        │
+  │                               │  ← 新訊息到了！
+  │←── 200 OK, [{id:101, ...}] ──│
+  │                               │
+  │── GET /messages?since=101 ──→ │  ← Client 立即發下一個 long poll
+  │                               │  ← 再次 hold 住...
+```
+
+**比 short polling 好的地方：**
+- 有資料時幾乎即時送達（不用等 polling interval）
+- 沒資料時不會產生大量空 response
+
+**仍然存在的問題：**
+- 每次收到回應後要重新建立 HTTP connection（雖然 keep-alive 可以緩解）
+- Server 需要 hold 大量 pending connections（consume thread/memory）
+- Timeout 後仍然有空 response
+
+**面試定位：** Long polling 是 WebSocket/SSE 出現前的主流方案。現在主要用在**不支援 WebSocket/SSE 的受限環境**，或作為 fallback。
+
+#### Webhook
+
+與前面四種不同，Webhook 是 **server-to-server** 的通知機制：
+
+```
+你的 Server                    第三方服務 (e.g., Stripe)
+  │                               │
+  │── 註冊 webhook URL ──────────→│
+  │   POST /api/webhooks/register │
+  │   {"url": "https://你的/callback", "events": ["payment.completed"]}
+  │                               │
+  │   ... (數天後，有人付款) ...   │
+  │                               │
+  │←── POST https://你的/callback ─│  ← Stripe 主動 POST 到你的 URL
+  │    {"event": "payment.completed", "data": {"amount": 99.00}}
+  │── 200 OK ─────────────────────→│  ← 你回 200 表示收到
+```
+
+**Webhook 設計的關鍵問題：**
+
+| 問題 | 解法 |
+|------|------|
+| **你的 server 掛了怎麼辦？** | 發送方需要 retry with exponential backoff（Stripe 會在 24 小時內 retry 最多 ~15 次） |
+| **怎麼確認是真的 Stripe 發的？** | **Signature verification** — Stripe 用 shared secret 對 payload 做 HMAC-SHA256 簽名，你驗證簽名 |
+| **重複收到同一個 event？** | 用 event ID 做 **idempotency check**（存到 DB，已處理過的 skip） |
+| **處理太慢？** | Webhook handler 應該立即回 200，把實際處理丟到 message queue 異步執行 |
+| **順序保證？** | **沒有**。Webhook 不保證事件順序。如果順序重要，handler 內需要檢查 timestamp 或 sequence number |
+
+**面試定位：** 支付系統（Stripe callback）、CI/CD（GitHub webhook 觸發 build）、第三方整合（Slack bot）幾乎都是 webhook。被問到「如何接收第三方的事件通知」時，答 webhook。
+
+---
+
+### WebSocket vs SSE 深入比較
 
 ```
 WebSocket:
