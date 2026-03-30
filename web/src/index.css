@@ -375,7 +375,8 @@ ul, ol { list-style: none; padding: 0; }
 .home-card-list li:last-child { border-bottom: none; }
 
 .home-card-link {
-  display: block;
+  display: flex;
+  align-items: center;
   width: 100%;
   text-align: left;
   background: none;

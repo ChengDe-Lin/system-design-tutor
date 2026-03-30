@@ -618,6 +618,11 @@ export default function App() {
                         className="mobile-search-result-item"
                       >
                         <span className="search-result-name">
+                          {deepDivePath[r.file.name] && (
+                            <span className="path-badge" style={{ color: deepDivePath[r.file.name].color }}>
+                              {deepDivePath[r.file.name].label}
+                            </span>
+                          )}
                           {r.file.name}
                         </span>
                         <span
@@ -736,16 +741,24 @@ export default function App() {
                   <p className="home-card-desc">{s.description}</p>
                   {s.files.length > 0 ? (
                     <ul className="home-card-list">
-                      {s.files.map((f) => (
+                      {s.files.map((f) => {
+                        const pi = s.key === 'deep_dives' ? deepDivePath[f.name] : undefined
+                        return (
                         <li key={f.path}>
                           <button
                             onClick={() => handleSelect(f)}
                             className="home-card-link"
                           >
+                            {pi && (
+                              <span className="path-badge" style={{ color: pi.color }}>
+                                {pi.label}
+                              </span>
+                            )}
                             {f.name}
                           </button>
                         </li>
-                      ))}
+                        )
+                      })}
                     </ul>
                   ) : (
                     <p className="home-card-empty">
