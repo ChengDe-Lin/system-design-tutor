@@ -529,6 +529,62 @@ export default function App() {
       </aside>
 
       <main className="main-content" ref={mainRef}>
+        <div className="mobile-search">
+          <div className="mobile-search-bar">
+            <input
+              type="text"
+              className="mobile-search-input"
+              placeholder="Search all notes…"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+            {searchQuery && (
+              <button
+                className="mobile-search-clear"
+                onClick={() => setSearchQuery('')}
+              >
+                ×
+              </button>
+            )}
+          </div>
+          {searchResults && (
+            <div className="mobile-search-results">
+              {searchResults.length === 0 ? (
+                <p className="mobile-search-empty">No matches found</p>
+              ) : (
+                <ul>
+                  {searchResults.map((r) => (
+                    <li key={r.file.path}>
+                      <button
+                        onClick={() => {
+                          handleSelect(r.file)
+                          setSearchQuery('')
+                        }}
+                        className="mobile-search-result-item"
+                      >
+                        <span className="search-result-name">
+                          {r.file.name}
+                        </span>
+                        <span
+                          className="search-result-section"
+                          style={{ color: r.section.color }}
+                        >
+                          {r.section.title}
+                        </span>
+                        {r.snippet && (
+                          <span className="search-result-snippet">
+                            {r.snippet}
+                          </span>
+                        )}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+
         {selected ? (
           <div className="article-layout">
             <div className="article-container">
