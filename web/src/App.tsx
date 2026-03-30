@@ -207,11 +207,11 @@ export default function App() {
     // Path A — 必刷 (>60% frequency)
     'Url Shortener':        { color: '#f7768e', label: 'A' },
     'Twitter':              { color: '#f7768e', label: 'A' },
-    'Chat System':          { color: '#f7768e', label: 'A' },
+    'Whatsapp':             { color: '#f7768e', label: 'A' },
     'Notification System':  { color: '#f7768e', label: 'A' },
     'Youtube':              { color: '#f7768e', label: 'A' },
     'Distributed Kv Store': { color: '#f7768e', label: 'A' },
-    'Web Crawler Search':   { color: '#f7768e', label: 'A' },
+    'Google Search':        { color: '#f7768e', label: 'A' },
     'Instagram':            { color: '#f7768e', label: 'A' },
     // Path B — 高頻 (30-60%)
     'Uber':                 { color: '#e0af68', label: 'B' },
@@ -220,14 +220,14 @@ export default function App() {
     'Google Maps':          { color: '#e0af68', label: 'B' },
     'Collaborative Editing':{ color: '#e0af68', label: 'B' },
     'Task Scheduler':       { color: '#e0af68', label: 'B' },
-    'Ecommerce':            { color: '#e0af68', label: 'B' },
+    'Amazon':               { color: '#e0af68', label: 'B' },
     // Path C — 差異化 (15-30%)
     'Dropbox Device Sync':  { color: '#73daca', label: 'C' },
-    'Monitoring System':    { color: '#73daca', label: 'C' },
+    'Datadog':              { color: '#73daca', label: 'C' },
     'Typeahead':            { color: '#73daca', label: 'C' },
     'Proximity Service':    { color: '#73daca', label: 'C' },
     'Stock Exchange':       { color: '#73daca', label: 'C' },
-    'Ad System':            { color: '#73daca', label: 'C' },
+    'Google Ads':           { color: '#73daca', label: 'C' },
   }
 
   // Recommended reading order: meta-skill → fundamentals → communication → resilience
@@ -250,14 +250,14 @@ export default function App() {
   // Deep dives ordered by study path: A → B → C
   const deepDiveOrder = [
     // Path A
-    'Url Shortener', 'Twitter', 'Chat System', 'Notification System',
-    'Youtube', 'Distributed Kv Store', 'Web Crawler Search', 'Instagram',
+    'Url Shortener', 'Twitter', 'Whatsapp', 'Notification System',
+    'Youtube', 'Distributed Kv Store', 'Google Search', 'Instagram',
     // Path B
     'Uber', 'Ticketmaster', 'Payment System', 'Google Maps',
-    'Collaborative Editing', 'Task Scheduler', 'Ecommerce',
+    'Collaborative Editing', 'Task Scheduler', 'Amazon',
     // Path C
-    'Dropbox Device Sync', 'Monitoring System', 'Typeahead',
-    'Proximity Service', 'Stock Exchange', 'Ad System',
+    'Dropbox Device Sync', 'Datadog', 'Typeahead',
+    'Proximity Service', 'Stock Exchange', 'Google Ads',
   ]
 
   const sections: Section[] = useMemo(
