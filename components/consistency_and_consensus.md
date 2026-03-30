@@ -346,6 +346,90 @@ Basic Paxos 只解決了「對一個值達成共識」的問題。但現實中�
 
 **總結**：就理論而言，Raft 和 Multi-Paxos 的本質能力是等價的（都提供相同的 safety 和 liveness 保證）。Raft 的優勢在於它是一個**完整的、可直接實現的規範**，而 Paxos 更像是一個**理論框架**，需要大量工程決策才能轉化為實際系統。對於新的系統設計，Raft 通常是更務實的選擇。
 
+### Coordination Services 實務：ZooKeeper / etcd
+
+Consensus 演算法很少直接實作在 application 裡。實務上，你會用 **coordination service**（協調服務）— 它們把 consensus 封裝成好用的 API。
+
+**ZooKeeper**（ZAB，Paxos 變體）和 **etcd**（Raft）是最常見的兩個：
+
+| | ZooKeeper | etcd |
+|---|---|---|
+| **Consensus** | ZAB（Paxos 變體） | Raft |
+| **資料模型** | 樹狀 znodes（類似檔案系統） | Flat key-value |
+| **語言** | Java | Go |
+| **Watch 機制** | 一次性 watch（觸發一次後要重新註冊） | Persistent watch + streaming |
+| **典型用戶** | Kafka, HBase, Hadoop, Solr | Kubernetes, CoreDNS, Vitess |
+
+#### 核心能力（兩者都提供）
+
+| 能力 | 說明 | 面試常見場景 |
+|------|------|-------------|
+| **Leader Election** | 多個 instance 競爭 leader，只有一個能成功。Leader 掛了自動重選 | DB primary 選舉、partition assignment |
+| **Distributed Lock** | 多個 process 搶同一把鎖，保證 mutual exclusion | 防止 cron job 重複執行 |
+| **Service Discovery** | 服務啟動時註冊，掛了自動移除 | 「哪些 Chat Server 還活著？」 |
+| **Configuration Store** | 強一致的 config，所有節點看到的設定一樣 | Feature flags, routing rules |
+| **Ephemeral Nodes（ZK 特有）** | 節點跟 client session 綁定，斷線自動刪除 | 見下方 presence 範例 |
+
+#### Ephemeral Nodes — ZooKeeper 的殺手功能
+
+```
+一般 node:
+  CREATE /config/db_host "10.0.1.5"
+  → 永久存在，直到手動刪除
+
+Ephemeral node:
+  CREATE /connections/user_123 "pod-A" EPHEMERAL
+  → 跟 client session 綁定
+  → Client 斷線 → session timeout（5-10s）→ 自動刪除
+  → 不需要 TTL、heartbeat 邏輯、cleanup job
+```
+
+適合追蹤「某個東西是否還活著」：
+- Server 是否在線？（service discovery）
+- User 是否連線中？（presence）
+- Lock 是否還被持有？（distributed lock）
+
+#### ⚠️ 不適合大量資料
+
+```
+ZooKeeper / etcd 的限制：
+  寫入吞吐：~10K writes/sec（每次寫入要過 consensus）
+  資料量上限：建議 < 幾百 MB（全部存在記憶體）
+
+適合：
+  ✅ 幾百台 server 的 service discovery
+  ✅ 幾千個 config keys
+  ✅ Leader election（一個 key）
+
+不適合：
+  ❌ 5 億用戶的 presence 狀態 → 用 Redis
+  ❌ 百萬級 session cache → 用 Redis
+  ❌ 高頻率的資料更新 → 用 Redis / DB
+```
+
+#### 面試中的分工模式
+
+```
+                  ┌──────────────┐
+                  │  ZooKeeper   │  少量、強一致
+                  │  / etcd      │  service discovery, leader election,
+                  │              │  config, distributed lock
+                  └──────┬───────┘
+                         │
+        ┌────────────────┼────────────────┐
+        ▼                ▼                ▼
+   Chat Server 1    Chat Server 2    Chat Server 3
+        │                │                │
+        ▼                ▼                ▼
+   ┌──────────────────────────────────────────┐
+   │              Redis Cluster                │  大量、高吞吐
+   │  user presence, session, cache, pub/sub   │
+   └──────────────────────────────────────────┘
+```
+
+面試時這樣講最清楚：
+> 「ZooKeeper 管 server — 追蹤哪些 server 活著、誰是 leader。Redis 管 user — 追蹤哪個 user 連到哪個 server。前者需要強一致但量少；後者量大但 eventual consistency 可接受。」
+
 ---
 
 ## 4. Replication Strategies（複製策略）
