@@ -202,8 +202,9 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const searchInputRef = useRef<HTMLInputElement>(null)
 
-  // Recommended reading order: fundamentals → building blocks → resilience
+  // Recommended reading order: meta-skill → fundamentals → communication → resilience
   const componentOrder = [
+    'Estimation Framework',
     'Networking',
     'Database',
     'Cache',
@@ -211,9 +212,11 @@ export default function App() {
     'Load Balancer',
     'Message Queue',
     'Api Design',
+    'Realtime Communication',
     'Rate Limiter',
     'Fault Tolerance',
     'Consistency And Consensus',
+    'Distributed Transactions',
   ]
 
   const sections: Section[] = useMemo(
