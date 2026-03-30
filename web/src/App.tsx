@@ -131,6 +131,18 @@ function extractHeadings(markdown: string): Heading[] {
   return headings
 }
 
+function extractQuickReview(markdown: string): string | null {
+  const sections = markdown.split(/(?=^## )/gm)
+  let target = sections.find((s) =>
+    /^## .*(Trade-off 總結|Takeaway)/i.test(s),
+  )
+  if (!target) {
+    target = sections.find((s) => /^## .*面試策略/.test(s))
+  }
+  if (!target) return null
+  return target.replace(/^## .+\n+/, '').trim()
+}
+
 function getTextContent(node: React.ReactNode): string {
   if (typeof node === 'string') return node
   if (typeof node === 'number') return String(node)
@@ -186,6 +198,7 @@ export default function App() {
   const [selected, setSelected] = useState<FileEntry | null>(null)
   const [activeHeadingId, setActiveHeadingId] = useState('')
   const mainRef = useRef<HTMLElement>(null)
+  const [showBackToTop, setShowBackToTop] = useState(false)
 
   // Recommended reading order: fundamentals → building blocks → resilience
   const componentOrder = [
@@ -242,6 +255,18 @@ export default function App() {
     [selected],
   )
 
+  const isDeepDive = selected?.path.includes('deep_dives') ?? false
+
+  const quickReviewContent = useMemo(
+    () => (selected && isDeepDive ? extractQuickReview(selected.content) : null),
+    [selected, isDeepDive],
+  )
+
+  const h2Headings = useMemo(
+    () => headings.filter((h) => h.level === 2),
+    [headings],
+  )
+
   useEffect(() => {
     if (!selected || headings.length === 0) return
 
@@ -270,6 +295,14 @@ export default function App() {
     mainRef.current?.scrollTo({ top: 0 })
     setActiveHeadingId('')
   }, [selected])
+
+  useEffect(() => {
+    const main = mainRef.current
+    if (!main) return
+    const onScroll = () => setShowBackToTop(main.scrollTop > 400)
+    main.addEventListener('scroll', onScroll, { passive: true })
+    return () => main.removeEventListener('scroll', onScroll)
+  }, [])
 
   const mdComponents: Components = useMemo(
     () => ({
@@ -304,6 +337,17 @@ export default function App() {
         }
         return <pre {...props}>{children}</pre>
       },
+    }),
+    [],
+  )
+
+  const quickReviewMdComponents: Components = useMemo(
+    () => ({
+      table: ({ children, ...props }: any) => (
+        <div className="table-wrapper">
+          <table {...props}>{children}</table>
+        </div>
+      ),
     }),
     [],
   )
@@ -378,6 +422,51 @@ export default function App() {
                 <span className="breadcrumb-sep">/</span>
                 <span className="breadcrumb-current">{selected.name}</span>
               </div>
+
+              {isDeepDive && quickReviewContent && (
+                <details className="quick-review" open>
+                  <summary className="quick-review-header">
+                    <span className="quick-review-title">Quick Review</span>
+                    <span className="quick-review-hint">你記得這些重點嗎？</span>
+                  </summary>
+                  <div className="quick-review-content">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      rehypePlugins={[rehypeRaw]}
+                      components={quickReviewMdComponents}
+                    >
+                      {quickReviewContent}
+                    </ReactMarkdown>
+                  </div>
+                </details>
+              )}
+
+              {isDeepDive && h2Headings.length > 0 && (
+                <nav className="inline-outline">
+                  <span className="inline-outline-title">Outline</span>
+                  <ol className="inline-outline-list">
+                    {h2Headings.map((h, i) => (
+                      <li key={`${h.id}-${i}`}>
+                        <a
+                          href={`#${h.id}`}
+                          onClick={(e) => {
+                            e.preventDefault()
+                            document
+                              .getElementById(h.id)
+                              ?.scrollIntoView({
+                                behavior: 'smooth',
+                                block: 'start',
+                              })
+                          }}
+                        >
+                          {h.text}
+                        </a>
+                      </li>
+                    ))}
+                  </ol>
+                </nav>
+              )}
+
               <article className="article-content">
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
@@ -436,6 +525,17 @@ export default function App() {
               ))}
             </div>
           </div>
+        )}
+        {showBackToTop && selected && (
+          <button
+            className="back-to-top"
+            onClick={() =>
+              mainRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+            }
+            aria-label="Back to top"
+          >
+            ↑
+          </button>
         )}
       </main>
     </div>
