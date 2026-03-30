@@ -199,6 +199,8 @@ export default function App() {
   const [activeHeadingId, setActiveHeadingId] = useState('')
   const mainRef = useRef<HTMLElement>(null)
   const [showBackToTop, setShowBackToTop] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const searchInputRef = useRef<HTMLInputElement>(null)
 
   // Recommended reading order: fundamentals → building blocks → resilience
   const componentOrder = [
@@ -267,6 +269,41 @@ export default function App() {
     [headings],
   )
 
+  const searchResults = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    if (!q) return null
+
+    const results: { file: FileEntry; section: Section; snippet: string }[] = []
+    for (const section of sections) {
+      for (const file of section.files) {
+        const nameMatch = file.name.toLowerCase().includes(q)
+        const contentLower = file.content.toLowerCase()
+        const contentMatch = contentLower.includes(q)
+
+        if (nameMatch || contentMatch) {
+          let snippet = ''
+          if (contentMatch) {
+            const idx = contentLower.indexOf(q)
+            const start = Math.max(0, idx - 50)
+            const end = Math.min(
+              file.content.length,
+              idx + q.length + 50,
+            )
+            snippet = file.content
+              .slice(start, end)
+              .replace(/[#*`|\n]/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim()
+            if (start > 0) snippet = '…' + snippet
+            if (end < file.content.length) snippet += '…'
+          }
+          results.push({ file, section, snippet })
+        }
+      }
+    }
+    return results
+  }, [searchQuery, sections])
+
   useEffect(() => {
     if (!selected || headings.length === 0) return
 
@@ -303,6 +340,21 @@ export default function App() {
     main.addEventListener('scroll', onScroll, { passive: true })
     return () => main.removeEventListener('scroll', onScroll)
   }, [])
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault()
+        searchInputRef.current?.focus()
+      }
+      if (e.key === 'Escape' && searchQuery) {
+        setSearchQuery('')
+        searchInputRef.current?.blur()
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [searchQuery])
 
   const mdComponents: Components = useMemo(
     () => ({
@@ -370,41 +422,109 @@ export default function App() {
           <span className="sidebar-count">{allFiles.length} notes</span>
         </div>
 
+        <div className="sidebar-search">
+          <input
+            ref={searchInputRef}
+            type="text"
+            className="sidebar-search-input"
+            placeholder="Search… ⌘K"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+          {searchQuery && (
+            <button
+              className="sidebar-search-clear"
+              onClick={() => setSearchQuery('')}
+            >
+              ×
+            </button>
+          )}
+        </div>
+
         <nav className="sidebar-nav">
-          {sections.map((s) => (
-            <div key={s.key} className="sidebar-section">
+          {searchResults ? (
+            <div className="sidebar-section">
               <div className="sidebar-section-header">
-                <span
-                  className="sidebar-dot"
-                  style={{ background: s.color, color: s.color }}
-                />
-                <span className="sidebar-section-title">{s.title}</span>
+                <span className="sidebar-section-title">
+                  {searchResults.length} result
+                  {searchResults.length !== 1 ? 's' : ''}
+                </span>
               </div>
-              {s.files.length === 0 ? (
-                <p className="sidebar-empty">No notes yet</p>
+              {searchResults.length === 0 ? (
+                <p className="sidebar-empty">No matches found</p>
               ) : (
                 <ul>
-                  {s.files.map((f) => (
-                    <li key={f.path}>
+                  {searchResults.map((r) => (
+                    <li key={r.file.path}>
                       <button
-                        onClick={() => handleSelect(f)}
-                        className={`sidebar-item ${
-                          selected?.path === f.path ? 'sidebar-item-active' : ''
+                        onClick={() => {
+                          handleSelect(r.file)
+                          setSearchQuery('')
+                        }}
+                        className={`sidebar-item search-result-item ${
+                          selected?.path === r.file.path
+                            ? 'sidebar-item-active'
+                            : ''
                         }`}
-                        style={
-                          selected?.path === f.path
-                            ? ({ borderLeftColor: s.color } as any)
-                            : undefined
-                        }
                       >
-                        {f.name}
+                        <span className="search-result-name">
+                          {r.file.name}
+                        </span>
+                        <span
+                          className="search-result-section"
+                          style={{ color: r.section.color }}
+                        >
+                          {r.section.title}
+                        </span>
+                        {r.snippet && (
+                          <span className="search-result-snippet">
+                            {r.snippet}
+                          </span>
+                        )}
                       </button>
                     </li>
                   ))}
                 </ul>
               )}
             </div>
-          ))}
+          ) : (
+            sections.map((s) => (
+              <div key={s.key} className="sidebar-section">
+                <div className="sidebar-section-header">
+                  <span
+                    className="sidebar-dot"
+                    style={{ background: s.color, color: s.color }}
+                  />
+                  <span className="sidebar-section-title">{s.title}</span>
+                </div>
+                {s.files.length === 0 ? (
+                  <p className="sidebar-empty">No notes yet</p>
+                ) : (
+                  <ul>
+                    {s.files.map((f) => (
+                      <li key={f.path}>
+                        <button
+                          onClick={() => handleSelect(f)}
+                          className={`sidebar-item ${
+                            selected?.path === f.path
+                              ? 'sidebar-item-active'
+                              : ''
+                          }`}
+                          style={
+                            selected?.path === f.path
+                              ? ({ borderLeftColor: s.color } as any)
+                              : undefined
+                          }
+                        >
+                          {f.name}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))
+          )}
         </nav>
       </aside>
 
@@ -441,7 +561,7 @@ export default function App() {
                 </details>
               )}
 
-              {isDeepDive && h2Headings.length > 0 && (
+              {h2Headings.length > 0 && (
                 <nav className="inline-outline">
                   <span className="inline-outline-title">Outline</span>
                   <ol className="inline-outline-list">
