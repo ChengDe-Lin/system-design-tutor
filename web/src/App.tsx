@@ -202,6 +202,34 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const searchInputRef = useRef<HTMLInputElement>(null)
 
+  // Study path colors for deep dives (sidebar dot indicator)
+  const deepDivePath: Record<string, { color: string; label: string }> = {
+    // Path A — 必刷 (>60% frequency)
+    'Url Shortener':        { color: '#f7768e', label: 'A' },
+    'Twitter':              { color: '#f7768e', label: 'A' },
+    'Chat System':          { color: '#f7768e', label: 'A' },
+    'Notification System':  { color: '#f7768e', label: 'A' },
+    'Youtube':              { color: '#f7768e', label: 'A' },
+    'Distributed Kv Store': { color: '#f7768e', label: 'A' },
+    'Web Crawler Search':   { color: '#f7768e', label: 'A' },
+    'Instagram':            { color: '#f7768e', label: 'A' },
+    // Path B — 高頻 (30-60%)
+    'Uber':                 { color: '#e0af68', label: 'B' },
+    'Ticketmaster':         { color: '#e0af68', label: 'B' },
+    'Payment System':       { color: '#e0af68', label: 'B' },
+    'Google Maps':          { color: '#e0af68', label: 'B' },
+    'Collaborative Editing':{ color: '#e0af68', label: 'B' },
+    'Task Scheduler':       { color: '#e0af68', label: 'B' },
+    'Ecommerce':            { color: '#e0af68', label: 'B' },
+    // Path C — 差異化 (15-30%)
+    'Dropbox Device Sync':  { color: '#73daca', label: 'C' },
+    'Monitoring System':    { color: '#73daca', label: 'C' },
+    'Typeahead':            { color: '#73daca', label: 'C' },
+    'Proximity Service':    { color: '#73daca', label: 'C' },
+    'Stock Exchange':       { color: '#73daca', label: 'C' },
+    'Ad System':            { color: '#73daca', label: 'C' },
+  }
+
   // Recommended reading order: meta-skill → fundamentals → communication → resilience
   const componentOrder = [
     'Estimation Framework',
@@ -217,6 +245,19 @@ export default function App() {
     'Fault Tolerance',
     'Consistency And Consensus',
     'Distributed Transactions',
+  ]
+
+  // Deep dives ordered by study path: A → B → C
+  const deepDiveOrder = [
+    // Path A
+    'Url Shortener', 'Twitter', 'Chat System', 'Notification System',
+    'Youtube', 'Distributed Kv Store', 'Web Crawler Search', 'Instagram',
+    // Path B
+    'Uber', 'Ticketmaster', 'Payment System', 'Google Maps',
+    'Collaborative Editing', 'Task Scheduler', 'Ecommerce',
+    // Path C
+    'Dropbox Device Sync', 'Monitoring System', 'Typeahead',
+    'Proximity Service', 'Stock Exchange', 'Ad System',
   ]
 
   const sections: Section[] = useMemo(
@@ -240,7 +281,7 @@ export default function App() {
         title: 'Deep Dives',
         description: 'Architecture case studies',
         color: 'var(--accent-blue)',
-        files: parseFiles(deepDiveMds),
+        files: parseFiles(deepDiveMds, deepDiveOrder),
       },
       {
         key: 'assessments',
@@ -504,7 +545,9 @@ export default function App() {
                   <p className="sidebar-empty">No notes yet</p>
                 ) : (
                   <ul>
-                    {s.files.map((f) => (
+                    {s.files.map((f) => {
+                      const pathInfo = s.key === 'deep_dives' ? deepDivePath[f.name] : undefined
+                      return (
                       <li key={f.path}>
                         <button
                           onClick={() => handleSelect(f)}
@@ -515,14 +558,23 @@ export default function App() {
                           }`}
                           style={
                             selected?.path === f.path
-                              ? ({ borderLeftColor: s.color } as any)
+                              ? ({ borderLeftColor: pathInfo?.color ?? s.color } as any)
                               : undefined
                           }
                         >
+                          {pathInfo && (
+                            <span
+                              className="path-badge"
+                              style={{ color: pathInfo.color }}
+                            >
+                              {pathInfo.label}
+                            </span>
+                          )}
                           {f.name}
                         </button>
                       </li>
-                    ))}
+                      )
+                    })}
                   </ul>
                 )}
               </div>
