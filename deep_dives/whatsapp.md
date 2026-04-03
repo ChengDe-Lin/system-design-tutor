@@ -524,33 +524,71 @@ Elasticsearch Index：
 
 ## 12. Media 訊息處理
 
+### 核心原則：Data Plane 與 Control Plane 分離
+
 ```
-上傳流程：
-  1. Client 先 upload media 到 Media Service → 回傳 media_url + media_key（E2EE 場景）
-  2. Client 發送訊息時帶 media_url → 不把 binary 塞進訊息本體
+Media binary（MB~GB 級）→ 走 HTTPS upload 直傳 Object Storage
+訊息 metadata（bytes 級）→ 走 WebSocket，只帶 URL reference
+```
 
-  為什麼分離上傳？
-    → Media 可能幾 MB ~ 幾百 MB → 不能塞進 WebSocket frame
-    → 上傳走 HTTPS upload（multipart 或 resumable upload）
-    → 訊息走 WebSocket（只帶 URL reference）
+→ 不把 binary 塞進 WebSocket frame（幾 MB~幾百 MB 會阻塞連線）
 
-處理 Pipeline（Media Service）：
-  1. 接收原始檔案 → 存入 Object Storage（S3）
-  2. 圖片：生成 thumbnail（150x150）+ compressed（720p）+ original
-  3. 影片：transcode to H.264 multiple bitrates（240p, 480p, 720p）
-  4. 語音：統一轉為 Opus codec
-  5. 處理完成 → URL 指向 CDN
+### 上傳方案比較
 
-E2EE 下的 Media 加密：
-  → Client 端加密 media → 上傳密文到 S3
-  → 訊息中帶 media_url + media_decryption_key
-  → 接收方下載密文 → 用 key 解密
-  → Server 和 CDN 看到的都是密文（無法辨識內容）
+```
+方案 A：Client → Media Service → S3     （Server 代理上傳）
+方案 B：Client → Pre-signed URL → S3    （Client 直傳）  ← 大規模首選
+```
 
-Storage 估算：
-  100B messages/day × 20% media × 500KB avg（壓縮後）= 10PB/day
-  → 這是 CDN + Object Storage 的主要成本
-  → 用 lifecycle policy：90 天後從 hot storage 移到 Glacier
+| 考量 | Pre-signed URL 直傳 (B) | 經過 Media Service (A) |
+|------|------------------------|----------------------|
+| 頻寬壓力 | Server 零負擔，S3 扛 | Server 扛全部流量 |
+| 水平擴展 | S3 天然無限擴展 | 要自己擴 Media Service |
+| 上傳前驗證 | 有限（可限 file size/content-type，但無法檢查實際內容） | 可即時做 virus scan、格式驗證、EXIF strip |
+| Resumable upload | S3 multipart upload 原生支援 | 要自己實作 |
+| 處理觸發 | 靠 S3 Event → SQS/Lambda（異步） | 同步或異步都行，控制力強 |
+
+### 推薦做法：Pre-signed URL + 異步 Pipeline
+
+```
+Client                     API Server              S3              Processing Queue
+  │  請求上傳                  │                    │                    │
+  │ ──────────────────────────→│ 驗證 auth/quota   │                    │
+  │  回傳 signed URL           │                    │                    │
+  │ ←──────────────────────────│                    │                    │
+  │  PUT 直傳 ────────────────────────────────────→ │                    │
+  │                            │         S3 Event ──────────────────────→│
+  │                            │                    │   thumbnail,       │
+  │                            │                    │   transcode,       │
+  │                            │                    │   virus scan       │
+  │  訊息帶 media_ref          │                    │                    │
+  │ ──────────────────────────→│                    │                    │
+```
+
+### 處理 Pipeline（異步，S3 Event 觸發）
+
+1. 圖片：生成 thumbnail（150x150）+ compressed（720p）+ original
+2. 影片：transcode to H.264 multiple bitrates（240p, 480p, 720p）
+3. 語音：統一轉為 Opus codec
+4. Virus scan / content moderation
+5. 處理完成 → URL 指向 CDN
+
+### E2EE 下的 Media 加密
+
+```
+→ Client 端加密 media → 用 pre-signed URL 直傳密文到 S3
+→ 訊息中帶 media_url + media_decryption_key
+→ 接收方下載密文 → 用 key 解密
+→ Server 和 CDN 看到的都是密文（無法辨識內容）
+→ Pre-signed URL 直傳在 E2EE 場景完全可行，且更合適（server 本來就不該碰明文）
+```
+
+### Storage 估算
+
+```
+100B messages/day × 20% media × 500KB avg（壓縮後）= 10PB/day
+→ 這是 CDN + Object Storage 的主要成本
+→ 用 lifecycle policy：90 天後從 hot storage 移到 Glacier
 ```
 
 ---
