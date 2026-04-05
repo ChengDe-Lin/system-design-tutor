@@ -691,3 +691,150 @@ START: "我需要選一個 database"
 | Reserved capacity discount | 53-76% off provisioned | 1 year or 3 year commitment |
 | Max GSI per table | 20 | 每個 GSI 消耗額外 WCU |
 | Max LSI per table | 5 | 必須建表時定義 |
+
+---
+
+## 6. OLAP 儲存引擎：ClickHouse / Druid / BigQuery
+
+> OLTP 優化「找到特定幾行」，OLAP 優化「掃描海量行的少數幾個欄位」。
+> 這是完全不同的存取模式，需要不同的儲存引擎。
+
+### Row-oriented vs Column-oriented
+
+```
+Row-oriented (MySQL, PostgreSQL):
+  磁碟排列：[id=1, name="Alice", age=30, region="US"] [id=2, name="Bob", age=25, ...]
+  → SELECT SUM(age) 要讀每一整行，大量無關 column 被讀入 = I/O 浪費
+
+Column-oriented (ClickHouse, Parquet):
+  磁碟排列：
+    id:     [1, 2, 3, 4, 5, ...]
+    name:   ["Alice", "Bob", "Carol", ...]
+    age:    [30, 25, 28, 35, ...]
+    region: ["US", "EU", "US", "AP", ...]
+  → SELECT SUM(age) 只讀 age 那一列，跳過所有其他 column
+  → 同型別資料連續排列 → 壓縮率極高（10-30x）
+```
+
+### ClickHouse 核心特性
+
+| 特性 | 說明 |
+|------|------|
+| **列式儲存** | 只讀需要的 column，大幅減少 I/O |
+| **壓縮率** | 同型別資料連續排列 → LZ4/ZSTD 壓縮 10-30x |
+| **向量化執行 (Vectorized Execution)** | 一次處理整個 column batch（用 SIMD 指令），CPU cache 友好 |
+| **MergeTree 引擎** | 寫入先到記憶體 buffer → flush 成 sorted part → 背景 merge（類似 LSM-Tree） |
+| **寫入速度** | Batch insert 百萬行/秒 |
+| **分散式查詢** | 資料 shard 到多節點，查詢平行掃描 |
+
+### MergeTree 寫入與更新機制
+
+```
+INSERT batch → Memory Buffer → flush → Disk Part (sorted by primary key)
+                                           │
+                                    背景非同步 merge
+                                           │
+                                    Merged Part (更大的 sorted part)
+
+「更新」怎麼做（沒有 in-place UPDATE）：
+  1. INSERT 新版本的 row（append-only）
+  2. 舊版和新版同時存在於不同 Part
+  3. 背景 merge 時，ReplacingMergeTree 保留最新版、丟棄舊版
+  4. Merge 完成前查詢可能讀到兩筆 → 用 SELECT ... FINAL 強制去重（較慢）
+
+其他 MergeTree 變體：
+  ReplacingMergeTree  → 按 primary key 去重，保留最新版
+  SummingMergeTree    → merge 時自動累加數值欄位（適合 counter）
+  AggregatingMergeTree → merge 時執行聚合函數（pre-aggregation）
+```
+
+### 沒有 ACID 的影響與應對
+
+```
+ClickHouse 保證的：
+  ✓ 單次 INSERT batch 是原子的（整批成功或整批失敗）
+  ✓ 資料寫入就不會丟（有 replication）
+
+ClickHouse 不保證的：
+  ✗ 跨表 transaction（INSERT A 成功 + INSERT B 失敗 = 不一致）
+  ✗ 即時一致性（merge 完成前可能讀到重複或舊版資料）
+  ✗ 隔離性（沒有 MVCC，查詢期間可能看到部分寫入結果）
+
+為什麼 OLAP 場景不怕：
+  → 資料來源是 Kafka/Flink pipeline，不是用戶直接操作
+  → Pipeline 本身有 exactly-once / 重試機制保證上游正確性
+  → 聚合查詢（SUM/COUNT/AVG）對少量重複不敏感
+  → 資料不會「丟了就丟了」— Kafka 保留原始 event，重跑 pipeline 即可修復
+```
+
+### Sharding 設定
+
+```sql
+-- 自動 sharding 仍需指定 shard key：
+CREATE TABLE clicks_distributed AS clicks_local
+ENGINE = Distributed(
+  'my_cluster',
+  'default',
+  'clicks_local',
+  sipHash64(ad_id)    -- ← shard key（你決定）
+);
+
+Shard key 選擇原則：
+  ad_id      → WHERE ad_id=X 只打一個 shard（推薦：查詢幾乎都帶 ad_id）
+  rand()     → 均勻分散，但每次查詢掃全部 shard
+  region     → 地區查詢快，但可能不均勻（US 資料遠多於其他）
+```
+
+### ClickHouse 不適合的場景
+
+| 場景 | 原因 |
+|------|------|
+| 單行 point lookup（WHERE id = 123） | 列式儲存要讀多個 column file 組出一行，不如 row-oriented |
+| 高頻小量更新 | 沒有原地 UPDATE，要靠非同步 mutation 重寫 part |
+| ACID Transaction | 無跨表 transaction |
+| 高並發短查詢（數千 QPS 小查詢） | 設計給少量大查詢，不是高並發 OLTP |
+
+### OLAP 選型比較
+
+| | ClickHouse | Apache Druid | BigQuery / Redshift |
+|--|-----------|-------------|-------------------|
+| **部署** | 自建 / ClickHouse Cloud | 自建 | 全託管 (Serverless) |
+| **寫入** | Batch insert 極快 | 原生 Kafka ingestion | Batch 或 streaming insert |
+| **查詢延遲** | 亞秒~秒 | **亞秒**（預聚合 + bitmap index） | 秒~分鐘 |
+| **預聚合** | Materialized View | **原生 roll-up ingestion** | Partition + clustering |
+| **SQL 支援** | 完整 | 有限（Druid SQL → 轉原生查詢） | 完整標準 SQL |
+| **成本** | 基礎設施（便宜） | 基礎設施（叢集複雜） | **按掃描量計費** |
+| **適合** | 即時 dashboard、log analytics | 超低延遲 slice-and-dice | Ad-hoc 分析、不想維運 |
+| **維運** | 中 | 高（多種節點角色） | **零** |
+
+### OLAP Capacity Planning
+
+| Metric (ClickHouse) | 數值 | 備註 |
+|---------------------|------|------|
+| Batch insert throughput | 百萬行/秒 | 取決於 column 數和大小 |
+| 壓縮率 | 10-30x | LZ4 預設；ZSTD 更高但 CPU 開銷大 |
+| 單節點掃描速度 | ~1-2 GB/s (compressed) | 受磁碟和 CPU 限制 |
+| 查詢並發 | ~50-100 concurrent | 大查詢吃 CPU，不適合高並發小查詢 |
+| 寫入到可查詢延遲 | ~1 秒 | Buffer flush interval |
+| Merge 背景開銷 | ~10-30% CPU | 持續進行，需要預留資源 |
+| 單節點儲存建議 | < 10TB (compressed) | 超過建議 sharding |
+| Replication factor | 通常 2-3 | 用 ReplicatedMergeTree |
+
+### OLAP 決策樹
+
+```
+需要分析/聚合查詢？
+├── 資料量 < 100GB，查詢不頻繁
+│   └── PostgreSQL 就夠了（columnar extension 或 parallel query）
+│
+├── 即時 dashboard + 自己維運
+│   ├── 需要亞秒 slice-and-dice → Druid
+│   └── 通用分析 + SQL → ClickHouse（首選）
+│
+├── 不想維運
+│   └── BigQuery (GCP) / Redshift (AWS) / Snowflake (multi-cloud)
+│
+└── 同時需要 OLTP + OLAP
+    ├── 小規模 → PostgreSQL (read replica 分流)
+    └── 大規模 → OLTP DB + CDC → ClickHouse（HTAP 分離架構）
+```
