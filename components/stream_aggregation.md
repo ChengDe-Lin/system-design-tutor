@@ -269,7 +269,79 @@ Unique Visitors：用 HyperLogLog → 12KB 追蹤十億 UV
 
 ---
 
-## 8. 決策樹
+## 8. 處理引擎選型：Flink vs Spark vs Hadoop MapReduce
+
+### 本質差異：處理模型
+
+```
+Flink:          event → process → event → process → event → process
+                逐條處理，真正的 stream-native
+
+Spark Streaming: [event, event, event] → batch process → [event, event, event] → batch process
+                 Micro-batch：每隔 N 秒收一批再處理
+
+Hadoop MR:      [整個 dataset] → Map → 寫磁碟 → Shuffle → 寫磁碟 → Reduce → 寫磁碟
+                純 batch，每步都落磁碟
+```
+
+### 比較矩陣
+
+| 維度 | Flink | Spark (Structured Streaming) | Hadoop MapReduce |
+|------|-------|------------------------------|------------------|
+| **處理模型** | 逐條 event（真串流） | Micro-batch（每 100ms~數秒一批） | 純 batch（分鐘~小時） |
+| **延遲** | **毫秒級** | 秒級（最低 ~100ms） | 分鐘級 |
+| **吞吐量** | 百萬 events/sec | 百萬 events/sec | 高（但延遲大） |
+| **State Management** | **原生支援**，RocksDB backend，可管理 TB 級 state | 有但較受限，大 state 效能下降 | 無原生 state（要靠外部儲存） |
+| **Exactly-once** | Chandy-Lamport checkpoint，**最成熟** | Checkpoint + WAL，可靠但機制較簡單 | 靠 HDFS 寫入的原子性 |
+| **Windowing** | Event time 原生支援、Watermark 機制完整 | 支援但基於 micro-batch 觸發 | 要自己實作 |
+| **Late event 處理** | Allowed lateness + side output，**最靈活** | 支援 watermark，但粒度受 batch interval 限制 | 不支援 |
+| **Batch 處理** | 可以（視 batch 為有界 stream） | **主場優勢**，生態豐富 | 主場（但已被 Spark 取代） |
+| **SQL 支援** | Flink SQL（持續改進中） | **Spark SQL，非常成熟** | Hive（另一套系統） |
+| **ML 整合** | 有 FlinkML 但生態小 | **MLlib，生態最大** | Mahout（已淘汰） |
+| **學習曲線** | 較陡（stream 思維、watermark 等概念） | 較平（會 SQL/DataFrame 就能上手） | 中（Map/Reduce 概念簡單但程式繁瑣） |
+| **社群/生態** | 串流領域最強，中國公司大量採用 | **整體生態最大**（Databricks 主推） | 逐漸被 Spark 取代 |
+| **維運複雜度** | 中高（state 管理、checkpoint tuning） | 中（Databricks 託管版很省事） | 高（Hadoop 叢集管理） |
+
+### 什麼場景選什麼
+
+```
+選 Flink 當：
+  ✓ 延遲要求毫秒級（ad click 計費、fraud detection、即時風控）
+  ✓ 需要複雜的 event time windowing + late event 處理
+  ✓ State 很大（per-key counter 跨數百萬 key）
+  ✓ 正確性要求極高（金融、計費 → exactly-once 最成熟）
+
+選 Spark 當：
+  ✓ 團隊已有 Spark batch pipeline，想統一技術棧
+  ✓ 秒級延遲可接受（dashboard、monitoring、日誌分析）
+  ✓ 同時需要 batch ETL + streaming（一套 code 兩種模式）
+  ✓ 需要 ML pipeline 整合（MLlib 生態遠大於 FlinkML）
+  ✓ 想用 Databricks 託管，少操心維運
+
+選 Hadoop MapReduce 當：
+  ✗ 幾乎不選了。唯一場景：維護 legacy 系統
+```
+
+### 面試中怎麼答
+
+```
+面試官問："為什麼選 Flink 不選 Spark？"
+
+回答框架：
+  1. 先說處理模型差異：Flink 逐條 vs Spark micro-batch
+  2. 再說這個差異在此場景的影響：
+     - Ad click 計費 → 毫秒級延遲 + exactly-once → Flink
+     - 日誌分析 dashboard → 秒級夠用 + 團隊熟 Spark → Spark
+  3. 補一句：不是 Flink 一定比 Spark 好，是 stream-first vs batch-first 的設計哲學不同
+
+不要說："Flink 比 Spark 快" ← 這太籠統
+要說："Flink 的逐條處理模型在延遲敏感場景下優於 Spark 的 micro-batch，
+      但 Spark 在 batch ETL 和 ML 整合的生態更成熟"
+```
+
+---
+
+## 9. 決策樹
 
 ```
 需要聚合事件流？
