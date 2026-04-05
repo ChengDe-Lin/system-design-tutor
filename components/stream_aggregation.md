@@ -133,7 +133,111 @@ Timeline:
 
 **Ad Click 場景用 (c)**：allowed lateness = 5 分鐘。超過 5 分鐘的 late click 進 side output → 觸發離線修正 job。
 
-### 3.3 Exactly-Once 語意
+### 3.3 Flink Checkpoint 機制（Chandy-Lamport 分散式快照）
+
+**問題**：Flink 是分散式系統，多個 operator 在不同機器上平行跑。如果其中一個掛了，怎麼恢復到一致的狀態？
+
+**核心想法**：定期對整個 pipeline 拍一張「一致性快照」，失敗時從最近的快照恢復。
+
+```
+Flink Pipeline 範例：
+  Source (Kafka) → Map → KeyBy(ad_id) → Window Aggregate → Sink
+
+每個 operator 都有自己的 state：
+  Source: 目前讀到的 Kafka offset
+  Window Aggregate: 每個 ad_id 的窗口計數 {ad_123: 47, ad_456: 12, ...}
+```
+
+#### Checkpoint 流程（Chandy-Lamport 演算法簡化版）
+
+```
+Step 1: JobManager 發起 checkpoint，注入 barrier 到 Source
+
+  Source          Map          Window Agg       Sink
+    │               │              │              │
+    │──barrier──→   │              │              │
+    │  data         │              │              │
+    │  data         │              │              │
+
+Step 2: Source 收到 barrier → 快照自己的 state（Kafka offset=1000）→ 轉發 barrier
+
+  Source          Map          Window Agg       Sink
+    │               │              │              │
+   [offset=1000]    │──barrier──→  │              │
+    saved ✓         │  data        │              │
+
+Step 3: 每個 operator 收到 barrier → 快照自己的 state → 轉發 barrier
+
+  Source          Map          Window Agg       Sink
+    │               │              │              │
+   [offset=1000]  [stateless]   [{ad_123:47}]    │──barrier──→
+    saved ✓        saved ✓       saved ✓          │
+
+Step 4: 所有 operator 都完成 → checkpoint 成功
+        State 存到持久化儲存（S3 / HDFS）
+```
+
+**Barrier 的關鍵**：它像一條分界線，把 stream 切成「checkpoint N 之前的資料」和「之後的資料」。Operator 看到 barrier 時，它的 state 剛好反映了 barrier 之前所有資料的處理結果。
+
+#### Barrier Alignment（多輸入的情況）
+
+```
+Window Aggregate 有兩個輸入 channel（來自不同 partition）：
+
+  Channel A: data, data, barrier, data, data ...
+  Channel B: data, data, data, data, barrier ...
+                                       ↑ barrier 還沒到
+
+  Window Agg 做法：
+    1. 收到 Channel A 的 barrier → 暫停消費 Channel A
+    2. 繼續消費 Channel B 直到也收到 barrier
+    3. 兩邊 barrier 都到齊 → 快照 state → 轉發 barrier → 恢復消費
+
+  為什麼要等？→ 確保快照反映的是兩邊同一「邏輯時間點」的 state
+```
+
+#### 失敗恢復
+
+```
+正常執行：
+  Checkpoint 1 (offset=1000, {ad_123:47})
+  Checkpoint 2 (offset=2000, {ad_123:89})    ← 最近一次成功的 checkpoint
+  ... 處理到 offset=2500 時 Window Agg 節點掛了 ...
+
+恢復：
+  1. 從 Checkpoint 2 恢復所有 operator 的 state
+     → Source 回到 offset=2000
+     → Window Agg 恢復 {ad_123:89}
+  2. 從 offset=2000 重新消費 Kafka，重新處理 2000-2500 的 events
+  3. 結果跟掛之前一樣（因為處理邏輯是 deterministic）
+
+  → 這就是 exactly-once 的保證：不多不少，剛好處理一次
+```
+
+### 3.4 Event Time vs Processing Time
+
+```
+Event Time:      event 實際發生的時間（client 端 timestamp）
+Processing Time: event 被 Flink 處理的時間（server 端收到的時間）
+
+為什麼不能用 Processing Time？
+
+  假設 Flink consumer 因為部署而暫停 5 分鐘：
+
+  Event Time 視角：
+    00:00-00:01 的 events 歸到 00:00-00:01 窗口 ✓（不管幾點被處理）
+
+  Processing Time 視角：
+    00:00-00:05 的 events 全部在 00:05 被處理
+    → 全部擠進 00:05-00:06 的窗口
+    → 00:00-00:04 的窗口全是空的，00:05 的窗口爆量
+    → 聚合結果完全失真
+
+結論：計費/分析場景必須用 Event Time
+     只有「我不在乎精確時間」的監控場景才用 Processing Time
+```
+
+### 3.5 Exactly-Once 三段保證
 
 ```
 計費場景：多算一次 click → 廣告主多付錢 → 要賠
@@ -142,13 +246,14 @@ Timeline:
 三個環節都要保證：
 
 ① Kafka → Flink：
-   Flink Kafka Consumer checkpoint offset → 失敗時從 checkpoint 恢復
+   Checkpoint 記錄 Kafka offset → 失敗時從 checkpoint 的 offset 恢復
    → 保證不重複消費
 
 ② Flink 內部計算：
-   Flink checkpoint（Chandy-Lamport 分散式快照）
-   → 定期把 state（各窗口計數）snapshot 到持久化儲存
-   → 失敗時從最近的 snapshot 恢復，重播 Kafka offset 之間的 events
+   Checkpoint（如上述 Chandy-Lamport 機制）
+   → 定期把 state（各窗口計數）snapshot 到持久化儲存（S3/HDFS）
+   → 失敗時從最近的 snapshot 恢復，重播中間的 events
+   → Checkpoint interval 通常 1-5 分鐘（越頻繁 = 恢復時重播越少，但開銷越大）
 
 ③ Flink → Sink（OLAP DB）：
    兩種方式：
@@ -158,9 +263,39 @@ Timeline:
       → 保證 checkpoint 與 sink 寫入原子性
 
 推薦 (a) 冪等寫入 → 實作簡單，OLAP DB 天然支援 upsert
+
+2PC 怎麼運作（簡述）：
+  Pre-commit: Flink 把資料寫入 sink 但標記為「未確認」
+  Checkpoint 成功 → Commit: 通知 sink 把資料標記為「已確認」（可被查詢）
+  Checkpoint 失敗 → Abort: 通知 sink 丟棄未確認的資料
+  → 保證 checkpoint 和 sink 寫入是原子的
+  → 代價：sink 必須支援 transaction（Kafka sink 支援，但大部分 OLAP DB 不支援）
+  → 所以實務上冪等寫入更常用
 ```
 
-### 3.4 儲存層
+### 3.6 Dead Letter Queue (DLQ)
+
+```
+DLQ 是什麼：處理失敗的 event 被送到的「隔離區」
+
+正常流程：
+  Kafka → Flink 處理 → 成功 → 寫入 ClickHouse
+
+某筆 event 處理失敗（格式錯誤、schema 不符、反序列化失敗）：
+  Kafka → Flink 處理 → 失敗 → 寫入 DLQ（另一個 Kafka topic）
+
+為什麼不直接丟掉？
+  → 計費場景少算一筆就是虧錢
+  → DLQ 裡的 event 後續可以人工檢查或修復後重新處理
+  → 也是監控告警的來源：DLQ 積壓量突然上升 = 上游資料格式出問題
+
+DLQ 的處理流程：
+  1. 告警：DLQ 積壓 > 閾值 → 觸發 PagerDuty
+  2. 診斷：查看失敗原因（schema 變更？新增未知欄位？）
+  3. 修復：修好 parser → 把 DLQ 的 events 重新灌回主 pipeline
+```
+
+### 3.7 儲存層
 
 | 選項 | 特性 | 適合 |
 |------|------|------|
@@ -173,7 +308,7 @@ Timeline:
 - 查詢：`SELECT ad_id, sum(clicks) FROM agg_table WHERE timestamp BETWEEN ... GROUP BY ad_id` → 毫秒級
 - 自帶 TTL 機制可自動清理過期資料
 
-### 3.5 Click Fraud Detection
+### 3.8 Click Fraud Detection
 
 ```
 常見欺詐模式：
@@ -245,10 +380,76 @@ Checkpoint interval: 1-5 分鐘（trade-off：頻繁 = 低數據損失但高開�
 | **HyperLogLog** | 基數估計（unique count） | ~12 KB 可估 10⁹ unique | ~0.81% 標準誤差 |
 | **HeavyKeeper** | Top-K 高頻元素 | O(K × depth) | 高頻元素幾乎精確 |
 
+### Count-Min Sketch 運作原理
+
 ```
-Ad Click 場景：精確計數（因為計費）
-Top-K Trending：用 Count-Min Sketch + Min-Heap → 省記憶體
-Unique Visitors：用 HyperLogLog → 12KB 追蹤十億 UV
+結構：一個 depth × width 的二維陣列，初始全為 0
+     每一行（row）對應一個獨立的 hash function
+
+寫入 "ad_123" 的 click：
+  hash_1("ad_123") % width = 3  → row 1, col 3 += 1
+  hash_2("ad_123") % width = 7  → row 2, col 7 += 1
+  hash_3("ad_123") % width = 1  → row 3, col 1 += 1
+
+查詢 "ad_123" 的 click count：
+  取 row 1[3], row 2[7], row 3[1] 中的最小值
+  → 為什麼取最小值？因為其他 key hash 到同一位置會導致高估
+  → 取最小值 = 取受 collision 影響最小的那個
+  → 所以 Count-Min Sketch 只會高估，不會低估
+
+空間：固定大小（e.g. 1000 × 5 = 5000 個 counter）
+     不管追蹤多少個 key 都一樣大
+     → 10 億個 key 也只用幾 KB
+```
+
+### HyperLogLog 運作原理
+
+```
+問題：統計 unique visitor count（不是每個 key 的 count，是有多少不同的 key）
+
+精確做法：HashSet → 10 億 unique user 要 ~幾十 GB 記憶體
+HyperLogLog：~12 KB 記憶體，誤差 ~0.81%
+
+核心觀察：
+  對隨機 hash 值，看二進位表示中「開頭連續 0 的最大長度」
+  → 如果你看到 0000001... （6 個前導零），大概觀察了 2⁶ = 64 個不同值
+
+  直覺：丟硬幣連續 6 次正面的機率是 1/64
+       → 如果你觀察到這個現象，推測你大概丟了 ~64 次
+
+  HyperLogLog 把 hash 空間分成很多 bucket（2¹⁴ = 16384 個）
+  每個 bucket 記錄看到的最大前導零數 → 最後做調和平均估算
+
+為什麼叫 "HyperLogLog"：
+  → 記錄的值是 log(log(N)) 等級的大小 → 極省空間
+```
+
+### HeavyKeeper（Top-K 高頻元素）
+
+```
+問題：找出 Top-K 最高頻的元素（e.g. 最熱門的 100 個搜尋關鍵字）
+
+結構：Count-Min Sketch 的變體 + Min-Heap (size K)
+
+差異：Count-Min Sketch 對每個 hash 碰撞都累加（高估）
+     HeavyKeeper 對低頻元素有「衰減」機制 → 高頻元素的 count 更精確
+
+流程：
+  1. 新 element 進來 → hash 到各行的 bucket
+  2. 如果 bucket 裡的 fingerprint 匹配 → 累加（是同一個 key）
+  3. 如果不匹配 → 以一定機率衰減現有 count（機率隨 count 值指數下降）
+     → 高頻元素幾乎不會被衰減掉，低頻元素很快歸零
+  4. Count 歸零 → 被新 element 替換
+  5. Min-Heap 維護 Top-K：count 超過 heap 最小值就替換
+
+適用：trending hashtags、熱門商品、Top-K 搜尋詞
+```
+
+```
+使用場景對應：
+  Ad Click 場景：精確計數（因為計費，不能用近似）
+  Top-K Trending：用 Count-Min Sketch + Min-Heap 或 HeavyKeeper → 省記憶體
+  Unique Visitors：用 HyperLogLog → 12KB 追蹤十億 UV
 ```
 
 ---
@@ -291,7 +492,7 @@ Hadoop MR:      [整個 dataset] → Map → 寫磁碟 → Shuffle → 寫磁碟
 | **處理模型** | 逐條 event（真串流） | Micro-batch（每 100ms~數秒一批） | 純 batch（分鐘~小時） |
 | **延遲** | **毫秒級** | 秒級（最低 ~100ms） | 分鐘級 |
 | **吞吐量** | 百萬 events/sec | 百萬 events/sec | 高（但延遲大） |
-| **State Management** | **原生支援**，RocksDB backend，可管理 TB 級 state | 有但較受限，大 state 效能下降 | 無原生 state（要靠外部儲存） |
+| **State Management** | **原生支援**，RocksDB backend（見下方說明），可管理 TB 級 state | 有但較受限，大 state 效能下降 | 無原生 state（要靠外部儲存） |
 | **Exactly-once** | Chandy-Lamport checkpoint，**最成熟** | Checkpoint + WAL，可靠但機制較簡單 | 靠 HDFS 寫入的原子性 |
 | **Windowing** | Event time 原生支援、Watermark 機制完整 | 支援但基於 micro-batch 觸發 | 要自己實作 |
 | **Late event 處理** | Allowed lateness + side output，**最靈活** | 支援 watermark，但粒度受 batch interval 限制 | 不支援 |
@@ -301,6 +502,30 @@ Hadoop MR:      [整個 dataset] → Map → 寫磁碟 → Shuffle → 寫磁碟
 | **學習曲線** | 較陡（stream 思維、watermark 等概念） | 較平（會 SQL/DataFrame 就能上手） | 中（Map/Reduce 概念簡單但程式繁瑣） |
 | **社群/生態** | 串流領域最強，中國公司大量採用 | **整體生態最大**（Databricks 主推） | 逐漸被 Spark 取代 |
 | **維運複雜度** | 中高（state 管理、checkpoint tuning） | 中（Databricks 託管版很省事） | 高（Hadoop 叢集管理） |
+
+### Flink State Backend：為什麼用 RocksDB
+
+```
+Flink 每個 operator 可以有 state（e.g. 窗口計數、per-key counter）
+State 需要存在某個地方 → 兩個選項：
+
+Heap State Backend:
+  → State 存在 JVM heap 記憶體裡
+  → 讀寫極快（記憶體操作）
+  → 限制：state 不能超過記憶體大小（幾 GB）
+  → 適合：state 很小的場景
+
+RocksDB State Backend:
+  → State 存在本地磁碟的 RocksDB（嵌入式 key-value store，LSM-Tree 結構）
+  → 熱資料在記憶體（block cache），冷資料在磁碟
+  → 可管理 TB 級 state（遠超記憶體大小）
+  → 讀寫比 Heap 慢（可能涉及磁碟 I/O），但對串流場景夠快
+  → Checkpoint 時做增量快照（只傳差異），不用每次傳整份 state
+
+Ad Click 場景：
+  數百萬 ad_id × 多個窗口 × 每個窗口的 counter = 幾十 GB state
+  → 超過記憶體 → 必須用 RocksDB
+```
 
 ### 什麼場景選什麼
 
@@ -341,7 +566,7 @@ Hadoop MR:      [整個 dataset] → Map → 寫磁碟 → Shuffle → 寫磁碟
 
 ---
 
-## 9. 決策樹
+## 9. 決策樹（整體）
 
 ```
 需要聚合事件流？
@@ -365,7 +590,7 @@ Hadoop MR:      [整個 dataset] → Map → 寫磁碟 → Shuffle → 寫磁碟
 
 ---
 
-## 9. 常見面試陷阱
+## 10. 常見面試陷阱
 
 | 陷阱 | 正確理解 |
 |------|---------|
