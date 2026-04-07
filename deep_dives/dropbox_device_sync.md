@@ -156,7 +156,7 @@ Redis Cluster（4 nodes）：
 - **Dropbox / Google Drive** — 檔案同步通知
 - **Slack** — channel 更新通知（搭配 WebSocket）
 - **Git webhook** — 通知 CI/CD 有 push → CI 自己去 fetch
-- **Email client** — IMAP IDLE（本質就是 long polling）
+- **Email client** — IMAP IDLE（persistent connection + server push，類似 SSE；與 long polling 不同，不需每次重新建立請求）
 
 ---
 

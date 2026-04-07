@@ -167,7 +167,7 @@ W = 寫入需要幾個 replica 確認才回 ack
 R = 讀取需要幾個 replica 回應才回 client
 
 常見配置：
-  N=3, W=2, R=2 → W+R=4 > N=3 → 保證讀寫交集 ≥ 1 → 強一致性
+  N=3, W=2, R=2 → W+R=4 > N=3 → 保證讀寫交集 ≥ 1 → quorum consistency（非 linearizability，concurrent writes 仍需 conflict resolution）
   N=3, W=1, R=1 → W+R=2 < N=3 → 可能讀到 stale → 最終一致性
   N=3, W=3, R=1 → 寫入慢但讀取極快（適合 read-heavy）
   N=3, W=1, R=3 → 寫入極快但讀取慢（適合 write-heavy）
@@ -175,10 +175,10 @@ R = 讀取需要幾個 replica 回應才回 client
 
 | 配置 | W+R vs N | 一致性 | Write Latency | Read Latency | 可用性 |
 |------|----------|--------|---------------|--------------|--------|
-| W=2, R=2 | 4 > 3 | 強一致 | 等第 2 慢的 replica | 等第 2 慢的 replica | 容忍 1 節點故障 |
+| W=2, R=2 | 4 > 3 | Quorum（非 linearizable） | 等第 2 慢的 replica | 等第 2 慢的 replica | 容忍 1 節點故障 |
 | W=1, R=1 | 2 < 3 | 最終一致 | 最快的 replica 即回 | 最快的 replica 即回 | 容忍 2 節點故障 |
-| W=3, R=1 | 4 > 3 | 強一致 | 等最慢的 replica | 最快即回 | Write 不容忍故障 |
-| W=1, R=3 | 4 > 3 | 強一致 | 最快即回 | 等最慢的 replica | Read 不容忍故障 |
+| W=3, R=1 | 4 > 3 | Quorum（非 linearizable） | 等最慢的 replica | 最快即回 | Write 不容忍故障 |
+| W=1, R=3 | 4 > 3 | Quorum（非 linearizable） | 最快即回 | 等最慢的 replica | Read 不容忍故障 |
 
 ### Sloppy Quorum + Hinted Handoff（暗示移交）
 
@@ -507,7 +507,7 @@ Read Repair：
 | 特性 | LSM-Tree | B-Tree |
 |------|----------|--------|
 | 寫入模式 | Sequential（append-only） | Random（in-place update） |
-| 寫入放大 (Write Amplification) | 10-30x（compaction 造成） | 2-3x（page split） |
+| 寫入放大 (Write Amplification) | 10-30x（compaction 造成） | 5-15x（WAL + full page writes + page split） |
 | 寫入吞吐量 | **極高**（sequential I/O） | 中等（random I/O） |
 | 讀取效率 | 中等（可能查多個 SSTable） | **高**（一次 B-Tree lookup） |
 | 空間放大 | 有（多版本共存直到 compaction） | 低（in-place update） |

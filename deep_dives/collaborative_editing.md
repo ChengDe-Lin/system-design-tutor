@@ -213,9 +213,9 @@ CRDT：位置用 unique ID → 不管操作順序如何，每個字元的 ID 永
 
 | 維度 | OT | CRDT |
 |------|-----|------|
-| Consistency Model | Server-authoritative，強一致 | 最終一致（Eventual Consistency） |
+| Consistency Model | 最終一致（server-authoritative 序列化保證收斂） | 最終一致（Eventual Consistency） |
 | 需要中央 Server？ | **是**（server 做 transform + 序列化） | **否**（P2P 可行） |
-| Latency | 需要 server round trip 才能確認 | 本地立即 apply，背景 merge |
+| Latency | 本地立即 apply（optimistic），確認需 server round trip | 本地立即 apply，確認靠背景 P2P merge |
 | Metadata Overhead | 低（ops 只有 type + position） | **高**（每個字元需要 unique ID + tombstone） |
 | 離線編輯 | 困難（需要 server 在線做 transform） | **原生支持**（離線編輯，上線自動 merge） |
 | 實作複雜度 | Transform 函數正確性難證明（O(N²) pairs） | 資料結構複雜但 merge 邏輯簡單 |
@@ -492,7 +492,7 @@ CRDT 的離線策略：
   | 維度                  | OT                    | CRDT                 |
   |-----------------------|-----------------------|----------------------|
   | 離線支持              | 有限，需額外處理         | 原生支持              |
-  | 重連 Merge 複雜度     | O(local × remote ops) | O(local ops)         |
+  | 重連 Merge 複雜度     | O(local × remote ops) | O(local + remote ops) |
   | 重連後衝突機率         | 高（需要大量 transform） | 低（自動 merge）      |
   | 離線時的資料量         | 只存 ops（小）          | ops + metadata（較大）|
 ```

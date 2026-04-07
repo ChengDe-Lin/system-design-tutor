@@ -244,7 +244,8 @@ Gorilla 壓縮：
   Value：XOR encoding
     連續的 float64 值變化不大（CPU 50.1% → 50.3%）
     XOR 前後兩個值 → 大量 leading/trailing zeros → 變長編碼
-    壓縮率：8 bytes → ~1-2 bits per value（最佳情況）
+    壓縮率：8 bytes → ~1-2 bits per value（最佳情況，連續相同值時）
+    平均值編碼約 6-8 bits；結合 timestamp，整體平均約 1.37 bytes/sample (~11 bits)
 
 實測壓縮效果：
   原始：16 bytes/sample
@@ -262,11 +263,12 @@ Gorilla 壓縮：
 
 ```
 PostgreSQL 寫入 benchmark：
-  單節點 ~50K inserts/sec（optimized, batched）
+  單節點 ~50K inserts/sec（row-by-row insert）
+  用 COPY / batched insert 可達 200-500K/sec
 
 需求：2M data points/sec
 
-差距：40x shortfall → 即使 40 個 PostgreSQL 節點也勉強
+差距：~4-10x shortfall（batched mode），仍需多節點水平擴展
 
 TSDB 優勢：
   1. Append-only sequential writes → SSD 可達 500K-1M writes/sec per node
@@ -302,12 +304,15 @@ TSDB 優勢：
   │ Resolution  │ Retention │ Storage per 30M series          │
   ├─────────────┼───────────┼─────────────────────────────────┤
   │ Raw (15s)   │ 15 days   │ 15 × 237 GB = ~3.5 TB          │
-  │ 5-min rollup│ 90 days   │ 90 × (237/20) GB = ~1.07 TB    │
+  │ 5-min rollup│ 90 days   │ 90 × (237/20) GB = ~1.07 TB *  │
   │ 1-hr rollup │ 1 year    │ 365 × (237/240) GB = ~360 GB   │
   └────────────────────────────────────────────────────────────┘
 
-  總儲存：~5 TB（vs 原始保留 1 年 = 86 TB）
-  → 儲存節省 ~17x
+  * 此估算假設每個 rollup 只存 1 個聚合值。實際每個 window 存 5 個值（min, max, avg, count, sum），
+    實際儲存為 ~1.07 TB × 5 = ~5.3 TB（5-min rollup），1-hr rollup 同理 ×5。
+
+  總儲存（含 5 aggregates）：~22 TB（vs 原始保留 1 年 = 86 TB）
+  → 儲存節省 ~4x
 
 Rollup 聚合：
   每個 5-min window 保存 5 個值：min, max, avg, count, sum

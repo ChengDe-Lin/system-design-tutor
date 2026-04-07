@@ -477,7 +477,7 @@ Order 是 **不可變記錄 (Immutable Record)**——狀態變更不是 UPDATE 
   1. 全局唯一，無需中央協調
   2. 包含時間 → 天然按時間排序
   3. 包含時間 → 可以按月/年 range shard（ORDER BY created_at 只打一個 shard）
-  4. 不可預測（不是自增），不洩漏業務量
+  4. 不是直接自增（含 timestamp + machine ID + sequence），但仍可被推算出大致時間和速率。如需隱藏業務量，考慮 UUIDv4 或加密後的 ID
 ```
 
 ---
