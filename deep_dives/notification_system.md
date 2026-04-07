@@ -194,7 +194,7 @@ Layer 1: Event-level Dedup（精確去重）
   Storage: Redis SET with TTL
     SETNX dedup:{event_id} 1 EX 86400   // 24h TTL
     → 如果 SETNX 返回 0 → 已處理，skip
-  成本：10B events/day × 36 bytes/key ≈ 360GB Redis → 分 4 個 Redis 節點
+  成本：10B events/day × ~100 bytes/entry（含 Redis overhead: dictEntry + SDS + RedisObject + jemalloc）≈ 1TB Redis → 分 ~10 個 Redis 節點
 
 Layer 2: Business-level Dedup（語意去重）
   Key: {event_type}:{actor_id}:{recipient_id}:{object_id}
@@ -436,8 +436,9 @@ Layer 2: Batch Workers（consume fanout topic，並行處理）
 
 ```
 用戶手機關機、網路斷線、App 未啟動 → Push 到不了
-  APNs/FCM 有內建 offline storage（會暫存最後一條），但只保留最新的
-  → 用戶上線後只看到最後一條 → 中間的通知全丟了
+  APNs: 每個 collapse_id（或 thread）只保留最新一條 → 同類通知會被覆蓋
+  FCM: 可暫存最多 ~20 條/device，保留最長 28 天
+  → 但都不保證完整送達所有歷史通知 → 仍需 server-side inbox
 ```
 
 ### 解法：Server-side Notification Inbox
@@ -665,8 +666,8 @@ Kafka:
   Broker 數量: 6-10 nodes (3 replicas)
 
 Dedup Redis:
-  10B events/day × 36 bytes/key = 360GB
-  TTL 24h → 穩態 ~360GB → 4 Redis 節點 (100GB each)
+  10B events/day × ~100 bytes/entry（含 Redis overhead）= ~1TB
+  TTL 24h → 穩態 ~1TB → ~10 Redis 節點 (100GB each)
 
 Rate Limit Redis:
   500M users × 3 channels × ~50 bytes = 75GB

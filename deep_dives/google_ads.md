@@ -449,14 +449,14 @@ Tracking Server → Kafka → 多個下游消費者：
   └── Attribution Service（歸因計算）
 
 規模：
-  Impressions: ~100B/day → ~1.2M events/sec
-  Clicks: ~1B/day → ~12K events/sec
+  Impressions: ~50B/day → ~580K events/sec
+  Clicks: ~200M/day → ~2.3K events/sec
   Kafka topic: 分 partition 按 campaign_id hash
   ClickHouse: 列式儲存，日查詢 PB 級數據，< 1 秒回應
 
 為什麼選 ClickHouse 而非 MySQL？
-  → 100B rows/day，MySQL 撐不住
-  → 列式壓縮：100B impressions × 200 bytes ≈ 20TB/day raw → 壓縮後 ~2TB/day
+  → 50B rows/day，MySQL 撐不住
+  → 列式壓縮：50B impressions × 200 bytes ≈ 10TB/day raw → 壓縮後 ~1TB/day
   → 聚合查詢（GROUP BY campaign, date）極快
 ```
 
@@ -552,13 +552,13 @@ Daily Budget 控制：
 | RTB Auctions/day | 50B → **~580K auctions/sec** |
 | DSPs per auction | 10-20 |
 | Bid responses/sec | 580K × 15 = **~8.7M bid eval/sec** |
-| Impressions/day | ~50B |
-| Clicks/day | ~1B（avg CTR ~2% for search, ~0.1% for display） |
-| Event tracking throughput | **~1.2M events/sec**（impression + click） |
+| Impressions/day | ~50B（~10% search, ~90% display） |
+| Clicks/day | ~200M（search: 5B × 2% = 100M, display: 45B × 0.1% = 45M, 加上 video/shopping 等 ≈ 200M） |
+| Event tracking throughput | **~600K events/sec**（impression + click） |
 | Targeting Index size (memory) | 10M campaigns × 5 segments × 8B = **~400MB** |
 | User Profile store | 2B users × 1KB = **~2TB**（Redis cluster） |
 | Freq cap entries (Redis) | 2B users × 10 campaigns/day × 20B = **~400GB** |
-| Impression log storage/day | 50B × 200B = **~10TB/day**（壓縮後 ~1TB） |
+| Impression log storage/day | 50B × 200 bytes = **~10TB/day**（壓縮後 ~1TB） |
 | Ad creative storage (CDN) | 10M active creatives × 500KB = **~5TB** |
 | CTR model inference | ~1.2M inferences/sec（batch: 100 candidates/request） |
 | End-to-end latency budget | **< 200ms**（self-serve）/ **< 100ms**（RTB） |

@@ -12,7 +12,7 @@ Instagram 的設計核心是 **媒體密集型社群平台的寫入、處理、�
   Feed reads/day: ~10B → ~115K reads/sec
   Explore page views/day: ~200M
 
-Read:Write ratio ≈ 20:1（讀 feed >> 上傳照片）
+Read:Write ratio ≈ 100:1（Feed reads 10B / Photo uploads 100M；若計入 stories + likes 等所有寫入則 ~15-20:1）
 
 核心矛盾：
   - 每張照片需產生 3+ 種尺寸 + CDN 分發，寫入放大嚴重
@@ -216,8 +216,11 @@ Instagram 實際做法 — Hybrid：
      → 但下拉刷新強制觸發重新排序
 
 成本估算：
-  Fine ranking: ~200 posts × 1ms/post on GPU = ~200ms
-  5B rankings/day → 需要 ~5000 GPU（如果每個 GPU 處理 ~1000 req/sec 的 batch inference）
+  Fine ranking: ~200 posts × 1ms/post on GPU = ~200ms per request
+  → 單 GPU 吞吐量：1000ms / 200ms = ~5 rankings/sec（sequential per request）
+  → 實務上用 batch inference（多 request 併行）+ model parallelism，單 GPU 可達 ~50-100 rankings/sec
+  5B rankings/day ÷ 86400 = ~58K rankings/sec
+  → 以 batch throughput ~100 rankings/sec per GPU 計算 → 需要 ~600 GPU
   → 這就是為什麼 candidate generation 階段要先把 1000 → 200，省 5 倍 GPU
 ```
 
@@ -293,11 +296,12 @@ Relationship closeness 計算：
 
 規模估算：
   熱門用戶的 story 可能有 100K+ 觀看者
-  → Redis Set 可以扛（100K × 8 bytes = 800KB per story）
+  → Redis Set 可以扛（100K × 8 bytes = 800KB per story，raw data）
 
-  全局：500M stories/day × avg 100 viewers × 8B = ~400GB
-  → TTL 24h 後自動清理，Redis 峰值 ~400GB
-  → 可接受（Redis cluster ~10 nodes for stories）
+  全局：500M stories/day × avg 100 viewers
+  → 實際 Redis SET 每個 entry overhead ~60 bytes（dictEntry + SDS + RedisObject + jemalloc）
+  → 500M × 100 × 60B = ~3TB 峰值
+  → TTL 24h 後自動清理，但峰值需 ~30-40 Redis 節點（100GB each）
 ```
 
 ---

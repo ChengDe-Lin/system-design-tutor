@@ -229,9 +229,8 @@ Dijkstra: O((V + E) log V)
   → 單次查詢 ~數秒 → 不可接受（目標 < 200ms）
 
 A* with Euclidean heuristic：
-  → 比 Dijkstra 好，但在高速公路繞路場景（先走遠再繞回來）
-     heuristic 不準確 → 退化成接近 Dijkstra
-  → 單次查詢 ~數百毫秒到秒級 → 仍然不夠快
+  → 比 Dijkstra 快 2-10x（heuristic 有效剪枝大部分節點）
+  → 但在大陸級圖（10B+ nodes）仍需數百毫秒~秒級，無法滿足 < 200ms 目標
 
 問題本質：
   台北到高雄 ~350 km，中間路網有上百萬節點
@@ -524,8 +523,8 @@ Query: "我附近 1 公里內的咖啡廳"
 索引方案：
 
 1. Geohash + 倒排索引：
-   Geohash "wsqq" (精度 ~600m) 內的 café：
-     geohash:wsqq:café → [poi_1, poi_7, poi_23, ...]
+   Geohash "wsqqpk" (6 字元，精度 ~600m) 內的 café：
+     geohash:wsqqpk:café → [poi_1, poi_7, poi_23, ...]
    查詢時展開相鄰的 9 個 geohash cell → merge → 按距離排序
 
 2. S2 Geometry（Google 使用）：
@@ -556,7 +555,7 @@ Query: "我附近 1 公里內的咖啡廳"
 | POI database | ~2 億 POI × 500 bytes = **~100 GB** |
 | Traffic data (real-time) | ~5 億 road segments × 20 bytes = **~10 GB** |
 | Offline map (per country) | ~1-5 GB（視面積而定） |
-| Routing Service nodes | ~50 台（每台 512 GB RAM，存 CH graph replica） |
+| Routing Service nodes | ~50 台（每台 512 GB RAM，存 CH graph replica；300GB graph 在 512GB 中偏緊，實務上常用 1TB+ RAM 機器或搭配地理分區降低單機記憶體需求） |
 | CDN Edge PoPs | 200+ 全球節點 |
 
 ---
