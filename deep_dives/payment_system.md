@@ -187,7 +187,7 @@ Payment Service 收到 request：
 
 72 小時是業界常見值：
   → 涵蓋一個完整週末
-  → Stripe 的 idempotency window 也是 48-72 小時
+  → Stripe 的 idempotency window 是 24 小時
 ```
 
 ### 實作細節：避免 Race Condition
@@ -626,7 +626,7 @@ Stripe 的重試策略：
 | 單筆 payment 資料 | ~2KB（含 metadata）|
 | Payment storage/day | 250M × 2KB = **500GB/day** |
 | Ledger entries/day | 250M × 3 entries（avg）= 750M entries → **~1.5TB/day** |
-| Idempotency keys（active） | ~250M（72h window）× 128B = **~32GB Redis** |
+| Idempotency keys（active） | ~250M（72h window）× 128B metadata = **~32GB Redis**（僅存 status + response pointer；完整 response_body 存 DB） |
 | Webhook events/day | ~500M（每筆 payment 平均 2 個 event）|
 | Reconciliation batch size | ~250M records/day → **需要 Spark/Flink** |
 | Redis nodes（idempotency） | 32GB / 30GB per node ≈ **2 primary + 2 replica** |

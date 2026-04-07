@@ -88,11 +88,11 @@ CDN 擋不住的是「點擊購買」的寫入請求。用 Waiting Room 削峰�
 
 ```
 使用者選座位 A3：
-  SETEX seat:event_789:A3 900 "{user_id: 123, locked_at: ...}"
-  （TTL = 900 秒 = 15 分鐘）
+  SET seat:event_789:A3 "{user_id: 123, locked_at: ...}" NX EX 900
+  （NX = 只在 key 不存在時設值，EX 900 = TTL 15 分鐘）
 
 其他人嘗試選 A3：
-  SETNX seat:event_789:A3 → 失敗（key 已存在）→ 告知「座位已被選」
+  SET seat:event_789:A3 "..." NX EX 900 → 失敗（key 已存在）→ 告知「座位已被選」
 
 15 分鐘後未付款：
   Redis 自動刪除 key → 座位自動釋放

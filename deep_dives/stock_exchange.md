@@ -103,7 +103,7 @@ Order Book for AAPL:
   - Cancel Order: O(1)（Order 有指向 linked list node 的指標）
 
 方案二：Array-based（固定小數點價格）
-  - 價格轉整數 index: $150.05 → index 1500500（cents × 100）
+  - 價格轉整數 index: $150.05 → index 15005（以 cent 為單位，即 $1 = 100）
   - 用陣列直接映射 price → order list
   - Lookup: O(1)
   - 但: 稀疏陣列浪費空間、不適合價格範圍極大的商品
@@ -129,7 +129,7 @@ struct Order {
     Order*   prev;
     Order*   next;
 };
-// sizeof(Order) ≈ 64 bytes → 恰好一個 CPU cache line
+// sizeof(Order) ≈ 56 bytes（< 64 bytes，fits within 一個 CPU cache line）
 ```
 
 ---
@@ -458,10 +458,10 @@ Crash Recovery:
   5. 恢復到 crash 前的精確狀態（deterministic replay）
 
 Recovery 時間估算:
-  Journal size: ~10M events/day
+  Journal size: ~500M events/day
   Replay speed: ~6M events/sec (single thread)
-  → Full day replay: ~1.7 秒
-  → 若有每小時 checkpoint → < 0.5 秒即可恢復
+  → Full day replay: ~83 秒
+  → 若有每小時 checkpoint → ~10 秒即可恢復
 ```
 
 ### Primary-Backup Replication

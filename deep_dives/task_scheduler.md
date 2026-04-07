@@ -662,7 +662,7 @@ Redis Sorted Set 也按 shard 分：
 | 指標 | 估算 |
 |------|------|
 | 每日任務量 | 500M → **~6K tasks/sec** |
-| Cron 觸發量 | 10M jobs × 平均每小時 1 次 = ~2.8K triggers/sec |
+| Cron 觸發量 | 10M jobs × 平均每 50 分鐘 1 次 ≈ ~3.3K triggers/sec（≈ 200K/min） |
 | Peak QPS (2x avg) | **~12K tasks/sec** |
 | Task record size | ~500 bytes |
 | Task Store (active) | 500M × 500B = **~250GB** |
