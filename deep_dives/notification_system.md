@@ -122,9 +122,13 @@
 各業務 Service 發送結構化事件到 Kafka：
 
 Topic 設計（按優先級分 topic，確保 P0 不被 P2 堵塞）：
-  notification.events.p0   → partition 8,  consumer group: notif-p0-workers (16 instances)
+  notification.events.p0   → partition 8,  consumer group: notif-p0-workers (8 instances)
   notification.events.p1   → partition 32, consumer group: notif-p1-workers (32 instances)
-  notification.events.p2   → partition 16, consumer group: notif-p2-workers (8 instances)
+  notification.events.p2   → partition 16, consumer group: notif-p2-workers (16 instances)
+
+  原則：consumer instances ≤ partition 數（同一 consumer group 內，1 partition 只能被 1 consumer 消費）
+       多出來的 consumer 會完全閒置，浪費資源
+       想要更多並行度 → 增加 partition 數（注意：partition 只能增不能減）
 
 Event Schema:
 {
