@@ -108,10 +108,14 @@ bit.ly 商業模式 = 賣 analytics → 用 302
 
 ```
 hash("https://example.com/very/long/url")
-  → MD5 = "d41d8cd98f00b204e9800998ecf8427e"
-  → 取前 7 位 → base62 encode → "kF3x9aB"
+  → MD5 = 128-bit raw bytes
+  → 正確做法：取 raw bytes（非 hex 字元），轉成整數後 mod 62^7（≈ 3.5 兆種組合）
+    → 再將結果轉為 base62 字串 → 得到 7 字元短碼，如 "kF3x9aB"
+  ⚠️ 常見錯誤：取 7 個 hex 字元再 "base62 encode"
+    → 7 hex chars = 28 bits = 僅 ~2.68 億種組合，collision 率極高
+    → 且 hex string 轉 base62 語義混亂
 
-✗ 有 collision（不同 URL 前 7 位可能一樣）
+✗ 有 collision（不同 URL 可能得到相同短碼）
 ✗ Collision 處理：append salt 重新 hash → write latency 不穩定
 ✓ 相同 URL 會得到相同短網址（天然去重）
 ```

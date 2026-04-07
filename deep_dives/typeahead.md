@@ -123,8 +123,8 @@ class TrieNode:
 
 預計算：
   每個節點存 top_k = [("system design", 5000), ("system", 1200), ("sys admin", 800)]
-  → 查詢 "sys" → 直接回傳 top_k → O(1)
-  → 延遲 < 1ms（純記憶體存取）
+  → 查詢 "sys" → 走到 s→y→s 節點 O(prefix_len) + 直接回傳 top_k O(1)
+  → 總複雜度 O(prefix_len) + O(1)，實務上 prefix_len ≤ 20 → 延遲 < 1ms（純記憶體存取）
 
 代價：
   每個節點多存 K 個 (string, frequency) → 記憶體增加
@@ -144,12 +144,14 @@ class TrieNode:
   "sys" → "tem"                 （2 個節點）
 
 節省多少？
-  假設 5M unique prefixes，平均 prefix 長度 8 chars
-  未壓縮：每個 char 一個節點 → ~40M 節點
-  壓縮後：合併單鏈 → ~8M 節點（節省約 80%）
+  假設 50M unique queries（與前文一致），但 Trie 中許多 query 共享前綴
+  unique prefixes（= Trie 節點數）遠少於 unique queries
+  未壓縮：50M queries × 平均長度 8 chars → 上限 400M 節點，
+    但因前綴共享，實際約 ~100-150M 節點
+  壓縮後（合併單鏈）：~20-30M 節點（節省約 80%）
 
   每節點 overhead（指標 + metadata）≈ 64 bytes
-  節省：32M × 64B = ~2GB
+  節省：~80-120M 節點 × 64B = ~5-8GB
 ```
 
 ---

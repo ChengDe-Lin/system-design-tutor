@@ -17,7 +17,8 @@ Read:Write ratio ≈ 1:1（不像 Twitter 偏讀，Chat 幾乎每條都要讀）
 
 核心矛盾：
   - 要在 < 100ms 內送達訊息（使用者感知即時）
-  - 同時要保證訊息不丟失（exactly-once delivery 語義）
+  - 同時要保證訊息不丟失（at-least-once delivery + 冪等去重，從使用者角度達到 effectively exactly-once）
+    （分散式環境下真正的 exactly-once delivery 在傳輸層不可行，實務上用 client_msg_id 做冪等去重）
   - 離線用戶上線後要能同步所有漏掉的訊息
   - 要支援多裝置同步（手機 + 桌面 + Web）
 ```
@@ -86,10 +87,12 @@ WebSocket 的優勢：
   3. 每條訊息 overhead 只有 2-6 bytes frame header（vs HTTP 的 ~500 bytes headers）
 
   200M 並發 WebSocket 連接：
-    每個連接 ~10KB memory（kernel socket buffer + app state）
-    200M × 10KB = 2TB memory
+    每個連接 ~20-50KB memory（kernel socket buffer + app state）
+    ⚠️ Linux 預設 socket buffer 為 128-256KB（send + recv 合計），
+      必須調小 SO_SNDBUF/SO_RCVBUF（例如各 4KB）才能壓到此範圍
+    以 ~30KB 估算：200M × 30KB = 6TB memory
     單機支持 ~500K connections（C10M 架構）
-    → 需要 ~400 台 Gateway server
+    → 需要 ~400 台 Gateway server（每台 ~15GB 用於連接記憶體）
 ```
 
 ### Connection Gateway 架構
@@ -148,6 +151,9 @@ message_id = {conversation_id}_{seq_num}
   → conversation_id 由建立對話時生成（UUID 或 Snowflake）
   → seq_num 由 Chat Service 透過 conversation-level counter 生成
   → 使用 Redis INCR conversation_seq:{conv_id} → atomic, 極快
+    ⚠️ 耐久性風險：Redis AOF 預設每秒 fsync，crash 時最多丟失 1 秒的 seq_num
+    緩解方案：(1) 使用 AOF always 模式（犧牲吞吐量），或
+              (2) 接受罕見的 seq gap，應用層在 recovery 時偵測並修補
 
 為什麼不用全局 Snowflake？
   → Chat 不需要跨 conversation 排序

@@ -239,17 +239,23 @@ Redis GEORADIUS 內部已經處理了這個問題
 **2. 不均勻 Cell 大小（Uneven Cell）**
 
 ```
-GeoHash 用 Mercator 投影 → 赤道附近的 cell 比高緯度的大
+GeoHash 不使用任何地圖投影，而是直接遞迴二分 lat/lng 座標範圍（度數）
+  問題：1° 經度在不同緯度代表的實際距離不同（經線在兩極收斂）
+  赤道：1° 經度 ≈ 111 km
+  北緯 60°：1° 經度 ≈ 55.8 km（cos(60°) ≈ 0.5）
+  → 同一 precision 的 GeoHash cell，經度方向的實際寬度在高緯度會縮小
   赤道：6-char cell ≈ 610m × 610m
-  北緯 60°：6-char cell ≈ 610m × 305m
+  北緯 60°：6-char cell ≈ 610m × 305m（經度方向縮短）
 
 對 Uber 的影響：
   同樣 precision 的 GeoHash，在不同緯度搜尋範圍不同
   → 高緯度城市可能需要 adaptive precision
 
 更好的替代：Google S2 (Hilbert curve)
-  → 等面積 cell，不受緯度影響
-  → Uber 實際在用 S2（H3 是 Uber 自研的 hexagonal grid，基於類似原理）
+  → 面積更均勻的 cell（變異約 1.5x 內），比 GeoHash 好很多但非完全等面積
+  → Uber 實際在用 S2；H3 是 Uber 自研的 hexagonal grid
+    H3 使用 icosahedron-to-hexagon 投影，與 S2 的 cube-face + Hilbert curve 數學原理完全不同
+    兩者解決同一問題（均勻空間索引）但用根本不同的方法
 ```
 
 ---
@@ -309,8 +315,8 @@ Storage：
 | Redis 記憶體（location only） | 5M × 128B = **640MB**（非常小） |
 | 叫車配對 QPS | ~100K/sec（全球） |
 | GEORADIUS per query | < 1ms |
-| Trip DB 寫入 | ~50K trips/sec |
-| Trip DB 儲存（每日） | 50K × 86400s × 500B ≈ **2TB/day** |
+| Trip DB 寫入 | ~350 trips/sec（全球 ~25-30M trips/day） |
+| Trip DB 儲存（每日） | 350 × 86400s × 500B ≈ **15GB/day** |
 
 ---
 

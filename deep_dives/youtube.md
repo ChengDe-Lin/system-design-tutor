@@ -13,9 +13,10 @@ YouTube 的設計核心是 **大規模影片上傳、轉碼與低延遲串流分
   平均影片長度: ~7 min
 
 儲存挑戰：
-  原始影片上傳: 500 hr/min × 60 min × ~2GB/hr (原始) = ~60TB/天（原始檔）
+  原始影片上傳: 500 hr/min × 60 min × 24 hr × ~2GB/hr (原始) = ~1.4PB/天（原始檔）
+  （500 hr/min = 每天 720K 小時上傳量，× 2GB/hr ≈ 1.4 PB）
   轉碼後多格式: 每支影片 × 6 解析度 × 3 編碼格式 ≈ 18 個版本
-  → 每日新增儲存 > 500TB（含所有轉碼版本）
+  → 每日新增儲存 >> 1PB（含所有轉碼版本，但轉碼後用更高效的 codec 會壓縮不少）
 
 流量模式：
   Read:Write ratio ≈ 1000:1（觀看遠遠多於上傳）
@@ -303,9 +304,10 @@ def select_next_quality(buffer_level, bandwidth_estimate, qualities):
 
 頻寬成本（YouTube 的最大開支之一）：
   假設每天 1B hours 觀看 × 平均 2.5 Mbps = ~1.1 EB/天 出站流量
-  CDN egress 成本 ~$0.02/GB → ~$22M/天 → ~$8B/年
-  → 這就是為什麼 Google 自建 CDN (Google Global Cache)
-     部署到 ISP 機房裡，減少跨網路流量
+  公有雲 CDN egress 定價 ~$0.02/GB → ~$22M/天 → ~$8B/年
+  但 Google 自建 CDN (Google Global Cache)，實際成本估計 ~$0.002-0.005/GB
+  → 實際年成本約 $0.8B-$2B/年（仍為最大開支之一）
+  → GGC 部署到 ISP 機房裡，減少跨網路流量，大幅降低 egress 成本
 ```
 
 ### Google Global Cache (GGC)

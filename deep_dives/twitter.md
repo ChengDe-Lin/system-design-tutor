@@ -115,7 +115,9 @@ Timeline = SELECT * FROM tweets
 
 ```
 普通用戶發 tweet → fan-out 到 200 followers → 200 次 Redis write
-  → 200 × 6K tweets/sec = ~1.2M Redis writes/sec → 可以扛
+  → 200 × 6K tweets/sec = ~1.2M Redis writes/sec
+  ⚠️ 注意：這是 all-push 情境的上界估算
+  Hybrid model 排除 >10K followers 的用戶後，實際 fan-out 寫入量遠低於此
 
 如果明星（50M followers）也 fan-out：
   1 條 tweet → 50M 次 Redis write
