@@ -252,8 +252,33 @@ SMS：每用戶每天最多 3 封
 
 Quiet Hours（勿擾時段）：
   用戶可設定 22:00 - 08:00 不接收 P1/P2 通知
-  → P1/P2 在 quiet hours 期間排入延遲佇列
   → P0 不受影響（安全警報隨時發送）
+
+  流程：
+    Kafka P1/P2 topic → Consumer 消費
+      ├── 不在 quiet hours → 正常送出
+      └── 在 quiet hours → INSERT INTO deferred_notifications DB
+                                 ↓
+                           Cron job（每分鐘掃一次）
+                                 ↓
+                           撈 deliver_after <= NOW() 的到期通知
+                                 ↓
+                           丟回 Kafka P1/P2 topic → Consumer 再消費 → 正常送出
+
+  Deferred Table:
+    deferred_notifications (
+      id, recipient_id, priority, deliver_after (UTC), payload, status
+    )
+    Index: (status, deliver_after) → cron job 只掃 pending + 到期的
+    deliver_after = quiet hours 結束時間（根據 user timezone 換算 UTC）
+
+  為什麼用 DB 不用 Kafka/Redis：
+    → Quiet hours 最長 10+ 小時，Kafka 沒有 delayed delivery，SQS 最多 15 分鐘
+    → 可能堆積幾億條（500M DAU × 20% 開啟 × 平均 5 條 = 5 億條/day）
+    → DB 便宜、持久、好管理（用戶改設定 → UPDATE status = 'cancelled'）
+
+  注意：Consumer 第二次消費時應再檢查一次 quiet hours 設定
+       → 防止用戶在 deferred 期間延長了 quiet hours
 
 實作：
 def should_deliver(user_id, channel, priority, user_tz):
