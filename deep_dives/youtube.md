@@ -158,11 +158,20 @@ DAG 做法：
     └─────────┘    └───────────┘   └─────────────┘
 
 Worker pool sizing（粗估）：
-  500 hr/min 上傳 → 假設每個 GPU worker 能 real-time encode 一路 1080p
-  每支影片需 ~18 個 encode tasks
-  → 需要 ~9000 個並行 encode tasks
-  → 考慮 GPU worker 處理速度約 2x real-time
-  → ~4500 GPU workers（peak，含 headroom）
+  500 hr/min 上傳，每支影片需 ~18 個 encode tasks（6 解析度 × 3 codec）
+  每分鐘產生 500 × 18 = 9000 小時的 encode 工作
+  GPU worker 速度約 2x real-time → 1 worker 每分鐘消化 2 分鐘的影片
+
+  如果要即時消化全部：
+    9000 hr/min = 540,000 min/min ÷ 2 = ~270,000 workers（不切實際）
+
+  實際策略：分優先級
+    Phase 1（即時）：只做 H.264 720p + 1080p（2 tasks）→ 上傳後幾分鐘內可播放
+      500 hr/min × 2 = 1000 hr/min = 60,000 min/min ÷ 2 = ~30,000 workers
+    Phase 2（背景）：其他 16 個版本（VP9/AV1、其他解析度）在數小時內 backfill
+      → 不需要即時，排隊慢慢做，worker 數量可以少很多
+
+  → GPU worker pool：~30,000-50,000（Phase 1 即時 + Phase 2 共用）
 ```
 
 ### Codec 選擇 Trade-off
@@ -634,7 +643,7 @@ INDEX idx_replies (parent_id, created_at ASC)             -- 某留言的回覆
 | CDN 出站流量 | 1B hrs × 2.5 Mbps avg = **~1.1 EB/day** |
 | 每日新增儲存（含轉碼） | **~4.8 PB/day** |
 | 每年新增儲存 | **~1.75 EB/year** |
-| Transcoding workers (GPU) | **~4500 (peak)** |
+| Transcoding workers (GPU) | **~30,000-50,000**（Phase 1 即時 + Phase 2 backfill） |
 | CDN Edge PoPs | **200+ 全球** |
 | Video Metadata DB size | 800M videos × 2KB = **~1.6TB** |
 | View count Redis | 熱門 50M videos × 16 bytes = **~800MB** |
