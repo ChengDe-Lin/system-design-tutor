@@ -206,9 +206,17 @@ Layer 2: Business-level Dedup（語意去重）
 
 ---
 
-## 6. 優先級佇列 (Priority Queue) 與 Rate Limiting
+## 6. 優先級隔離 (Priority Isolation) 與 Rate Limiting
 
-### Priority Queue 設計
+### 優先級設計（用分 Topic 模擬，非資料結構的 Priority Queue）
+
+```
+Kafka 本身不支援 message-level priority。
+做法是按優先級分 topic（見 Section 3），每個 topic 有獨立的 consumer group：
+  → P2 行銷通知堆積不會影響 P0 安全警報的消費速度
+  → 本質是 resource isolation，不是 priority queue
+  → RabbitMQ 原生支援 per-message priority，但 Kafka 的分 topic 方案更適合大規模場景
+```
 
 ```
 P0 (Security):
