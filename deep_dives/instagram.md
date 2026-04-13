@@ -352,10 +352,29 @@ Interest Graph 是一個 bipartite graph：
   2. Ad targeting（廣告投放）
   3. Trending topics detection per interest cluster
 
-儲存：
-  Precomputed daily → 寫入 Feature Store
-  Online update：每次互動即時更新 Redis hash
-    HINCRBY interests:{user_id} travel 1
+資料流（兩層更新）：
+
+  即時：User 互動 → Kafka → Consumer 做 Redis HINCRBY interests:{user_id} travel 1
+       → 只做加分，不做衰減（快）
+
+  每日 Batch Job：
+    → 從 Data Warehouse（BigQuery / Hive）讀全部互動紀錄
+    → 套用 recency decay（7 天前 ×0.9、30 天前 ×0.5、90 天前 ×0.1）
+    → 重算每個 user 的完整 interest vector
+    → 寫入 Feature Store（持久化）+ 同步更新 Redis（cache）
+
+  為什麼用 Data Warehouse 而非 MySQL：
+    → 查詢模式是「掃幾十億行互動紀錄、只讀 tag + timestamp、做 GROUP BY 聚合」
+    → 列式儲存只讀需要的 column → I/O 少幾十倍
+    → BigQuery serverless 按掃描量計費，每天跑一次 batch 很便宜
+    → MySQL 對 10B 行的 GROUP BY 會極慢
+
+儲存分層：
+  Data Warehouse（BigQuery）：原始互動紀錄的 source of truth（永久保存）
+  Feature Store：每日重算的 interest vector（持久化，模型訓練用）
+  Redis：Feature Store 的 cache（即時查詢用，掛了從 Feature Store 重建）
+
+  Redis 掉了的影響：推薦降級到昨天的 interest vector → 可接受
 ```
 
 ---
