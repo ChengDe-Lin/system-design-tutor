@@ -838,3 +838,147 @@ Shard key 選擇原則：
     ├── 小規模 → PostgreSQL (read replica 分流)
     └── 大規模 → OLTP DB + CDC → ClickHouse（HTAP 分離架構）
 ```
+
+---
+
+## 7. 跨題通用心智模型：Precompute on Write、State vs Event、OLAP 觸發
+
+> 這一節整理 system design 裡最常重複出現的三個核心觀念。Instagram / WhatsApp / Ticketmaster / Payment 幾乎每一題都會用到，先在此抽象化，回到單題時就是「套公式」。
+
+### 7.1 原則：Precompute on Write（把運算從讀路徑搬到寫路徑）
+
+**適用條件**：讀流量 >> 寫流量（10:1 以上）。
+
+核心邏輯：讀便宜 = 多付一點寫代價也划算。社交 / feed / e-commerce 幾乎都是 read-heavy，這條原則反覆出現。
+
+#### Precompute on Write 家族
+
+| Pattern | 在寫路徑做什麼 | 讀路徑變成 | 典型場景 |
+|---------|---------------|-----------|---------|
+| **Fan-out on write** | 把一份資料複製到 N 個 inbox | 讀自己的 inbox = O(1) | Twitter / IG feed、通知系統 |
+| **Materialized aggregate** | 更新一個彙總值 (INCR / UPDATE) | 讀彙總欄位 = O(1) | like_count、follower_count、comment_count |
+| **Denormalization** | 把 JOIN 結果先展平存 | 讀不用 JOIN | MongoDB 嵌入子文件、Cassandra wide row |
+| **Materialized view** | 把複雜 query 結果 precompute 成表 | 讀預算好的結果 | PostgreSQL MATERIALIZED VIEW、ClickHouse AggregatingMergeTree |
+| **Secondary / Inverted index** | 寫時同步維護反向索引 | 按不同 key 查 O(log n) / O(1) | DB 的 secondary index、Elasticsearch |
+| **Cache warming** | 寫入時順便寫 cache | 讀打 cache 不打 DB | Write-through / write-behind cache |
+
+#### Fan-out on write vs Materialized aggregate 的關鍵差別（容易搞混）
+
+| | Fan-out on write | Materialized aggregate |
+|---|------------------|------------------------|
+| **問題本質** | 資料**擴散** (1 → N) | 資料**壓縮** (N → 1) |
+| **寫成本** | **O(N)** — 名人發文推 100M followers 很貴 | **O(1)** — 改一個 counter |
+| **典型場景** | Feed 推送、notification 分發 | Counter、leaderboard、小 summary |
+| **瓶頸** | 名人 fan-out amplification（需要 fan-out on read 混合） | Hot-row contention（需要 Redis counter 做 shard） |
+
+### 7.2 State vs Event：同一份資訊可以同時存兩份
+
+設計任何寫 path 時，先拆開「當前狀態」和「事件歷史」兩個角色——它們存的是不同語意、用不同儲存、服務不同 query。
+
+```
+         User action (e.g., click like)
+                    │
+                    ↓
+                 Kafka  ← single source of event
+                    │
+         ┌──────────┼──────────────┐
+         ↓          ↓              ↓
+      OLTP        OLAP          Cache
+    (State)     (Event Log)   (加速層)
+         │          │              │
+    現在是什麼？  發生過什麼？   常查的熱資料
+    dedup/UPDATE  全量 append     Redis
+    point lookup  batch aggregate
+```
+
+| 維度 | State 表 | Event log 表 |
+|------|---------|-------------|
+| **語意** | 當前事實（誰現在 like 了什麼） | 歷史事件（所有動作紀錄） |
+| **寫入** | INSERT / UPDATE / DELETE | **永遠 append**（unlike 也是一筆 `action=unlike` event） |
+| **主要 query** | Point lookup、單筆 UPDATE | Full scan、GROUP BY、跨時間聚合 |
+| **儲存** | **OLTP** (MySQL / Cassandra / DynamoDB) | **OLAP** (BigQuery / ClickHouse / S3 Parquet) |
+| **Latency** | <10ms | 秒~分鐘 |
+| **使用者** | 線上 API（終端 user） | 內部 team、ML、BI dashboard |
+| **例子** | `likes`, `orders`, `accounts`, `inventory` | `interaction_log`, `audit_log`, `event_store`, `metrics` |
+
+#### 同一個「like」動作的 dual storage
+
+| 資料 | 存哪 | 回答的 query |
+|------|------|-------------|
+| `likes(post_id, user_id, ts)` | OLTP MySQL/Cassandra | 「User X 有沒有 like post Y？」「列出 post Y 最新 50 個 likers」 |
+| `interaction_log(user_id, post_id, action, tag, ts)` | OLAP BigQuery | 「過去 90 天 user X 互動過哪些 tag？」「trending posts 計算」 |
+| `post_likes:{post_id}` counter | Redis | 「post Y 現在有幾 like」(高 QPS read) |
+| `posts.like_count` | OLTP (materialized aggregate) | Redis miss fallback、持久化彙總 |
+
+**選儲存的鐵則：看 dominant query pattern，不看資料形狀。** append-only 不代表要用 OLAP；millions of rows 不代表要用 OLAP。要看**每次 query 觸碰幾 row + latency 要求**。
+
+### 7.3 OLTP vs OLAP 判斷 checklist（7 題）
+
+遇到「這張表放哪？」的設計問題時，依序問：
+
+| # | 問題 | OLTP | OLAP |
+|---|------|------|------|
+| 1 | Dominant query 觸碰幾 row？ | 1 ~ 幾百 (by index) | 百萬 ~ 數十億 |
+| 2 | Latency 要求？ | <100ms | 秒 ~ 分鐘 OK |
+| 3 | 寫入 pattern？ | 高 QPS single-row | Batch (萬筆起) |
+| 4 | 是否需要 point lookup (by PK)？ | **需要（且高頻）** | 幾乎沒有 |
+| 5 | 是否需要 DELETE/UPDATE 單筆？ | **需要** | 不需要（append-only） |
+| 6 | 是否需要 transaction？ | 需要 | 不需要（eventually consistent） |
+| 7 | 查詢 QPS？ | 高（每次 user action） | 低（分析師 / cron / dashboard） |
+
+**決策法則：7 題超過 4 題偏 OLTP 答案 → 放 OLTP。剩下的 analytics 需求用 CDC → OLAP。**
+
+### 7.4 什麼時候要想到 OLAP？（最常遺漏的 6 個場景）
+
+大多數 system design 題的線上服務路徑不需要 OLAP，但**面試時提一句「analytics 走 CDC → warehouse」是 senior 訊號**。
+
+| # | 場景 | 例子 | 典型技術 |
+|---|------|------|---------|
+| 1 | **BI Dashboard / 產品指標** | MAU, DAU, retention, conversion funnel | BigQuery + Looker/Tableau |
+| 2 | **ML Feature Pipeline** | User interest vector 每日重算、embedding 訓練 | Spark / BigQuery → Feature Store |
+| 3 | **Ad-hoc 探索性分析** | 「上週 DAU 為什麼掉 5%？」「哪些 feature 影響留存？」 | BigQuery / Snowflake + SQL |
+| 4 | **Batch 排名 / Trending 計算** | Top 100 posts this week、trending hashtags、viral detection | Hive / Spark 每小時跑 |
+| 5 | **Compliance / Reporting** | 每日財報、監管 audit、稅務報告 | Snowflake / Redshift |
+| 6 | **Cold Data Archive** | 5 年前的訂單歸檔、歷史 log 查詢 | S3 Parquet + Athena |
+
+**OLAP 觸發訊號（任一符合就要考慮）：**
+- 要掃 million+ rows 做 GROUP BY / SUM / AVG
+- Latency 可容忍秒級以上
+- Read QPS 低（分析師 / dashboard / cron）
+- Query 是 ad-hoc 探索性（不能預建 index）
+- 終端使用者是內部 team / ML pipeline（不是 C-end user）
+
+### 7.5 真實系統的 Dual Architecture（每個成熟系統都有）
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│  ONLINE WORLD  (OLTP + cache + search)                             │
+│  ──────────────────────────────────────────────────                │
+│  MySQL / Cassandra / DynamoDB  +  Redis  +  Elasticsearch          │
+│  服務 end user、ms latency、high QPS                                │
+│  📌 大部分 system design 題主要討論這一層                            │
+└───────────────────────────┬────────────────────────────────────────┘
+                            │ CDC (Debezium) / Kafka event stream
+                            ↓
+┌────────────────────────────────────────────────────────────────────┐
+│  OFFLINE WORLD  (OLAP + data lake + feature store)                 │
+│  ──────────────────────────────────────────────────                │
+│  BigQuery / Snowflake / ClickHouse  +  S3 Parquet  +  Feast        │
+│  服務內部 team + ML + BI、秒~分鐘 latency、low QPS                  │
+│  📌 面試時主動提這一層 → senior architect 訊號                       │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+### 7.6 一頁總結（套路化檢查清單）
+
+設計任何 read-heavy 系統時，依序檢查：
+
+1. **Read:Write ratio > 10:1 嗎？** → 考慮 Precompute on Write 家族
+2. **某個欄位是聚合值（count / sum）嗎？** → Materialized aggregate（Redis counter + 週期 flush）
+3. **一份資料要給多個 user 即時看嗎？** → Fan-out on write（或混合 fan-out on read 處理名人）
+4. **寫入會集中在少數 hot row 嗎？** → Redis 吸收爭用，避免 DB row lock
+5. **同一份事件有沒有 analytics 需求？** → CDC → OLAP，線上 OLTP 不動
+6. **每個 query 掃幾 row？** → <1000 用 OLTP、million+ 用 OLAP（看 dominant query）
+7. **這張表是 state 還是 event？** → State 用 OLTP、event log 用 OLAP（可並存）
+
+> **記憶口訣：寫路徑多付代價、讀路徑白吃；State 和 Event 是雙胞胎、各住各家；選儲存看 query 不看資料形狀。**

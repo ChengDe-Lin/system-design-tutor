@@ -438,33 +438,78 @@ Cache 命中率目標：
 
 ## 8. Like / Comment 系統
 
-### Like 計數器：Redis + 非同步刷盤
+### Like 計數器：Redis 加速層 + DB Source of Truth
+
+**核心心法：Redis 永遠只是加速層，真相層必須在 DB。** 設計時必須能回答「Redis 全掉了怎麼重建？」
 
 ```
 Like 是 Instagram 最高頻的操作之一：
   估算：500M DAU × 10 likes/day = 5B likes/day → ~58K likes/sec
 
-即時寫 DB 的問題：
-  58K writes/sec to MySQL → 吃不消（尤其是更新同一行的 like_count）
+Redis 計數器到底解決什麼問題？
+  ─ 不是「避免寫 DB」（明細還是要寫），而是兩個不同問題：
+    1. 避免 hot-row UPDATE 爭用：
+       熱門貼文 (celebrity/viral) 可能每秒數千人 like 同一行 posts。
+       直接 UPDATE posts SET like_count = like_count + 1 會在單一 row
+       上排隊 lock，throughput 崩潰。Redis INCR 是 O(1) 原子操作
+       （單執行緒 event loop 不會 contention），30 秒才 UPDATE 一次
+       最終值 → 58K UPDATEs/sec → ~33 UPDATEs/sec。
+    2. 服務 read QPS：
+       Feed render 每次顯示貼文都要讀 like_count。Redis GET < 1ms、
+       每節點 100K+ QPS；打 DB 做這件事會吃光 replica。
+  ─ 明細 INSERT 仍然會打 DB，但不在 hot row 上，而是 append-only 新列，
+    可以按 post_id sharding、Kafka consumer batch insert，58K INSERTs/sec
+    分散到多個 shard 後每 shard 只吃幾 K ops/sec，MySQL 撐得住。
 
-解法：Redis 計數器 + 非同步 flush
+資料分層：
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 層級     │ 資料                 │ 語意         │ 重建來源     │
+  ├─────────────────────────────────────────────────────────────┤
+  │ Source   │ likes(post_id,       │ 誰 like 了誰 │ —（真相）    │
+  │ of truth │   user_id, created)  │ Primary data │              │
+  │ (MySQL)  │ posts.like_count     │ 彙總（最終）  │ COUNT(likes) │
+  ├─────────────────────────────────────────────────────────────┤
+  │ Cache    │ post_likes:{id}      │ 彙總（即時）  │ posts 欄位 + │
+  │ (Redis)  │   (counter)          │              │ 未 flush 增量│
+  │          │ liked_by:{id}        │ dedup 索引   │ likes 表     │
+  │          │   (Set / Bloom)      │ (熱路徑加速)  │ SELECT       │
+  └─────────────────────────────────────────────────────────────┘
 
-Like 寫入 path：
-  1. INCR post_likes:{post_id}        ← Redis，原子操作，< 1ms
-  2. SADD liked_by:{post_id} {user_id} ← 記錄誰 liked（防重複）
-  3. 每 30 秒批次 flush：
-     → 從 Redis 讀取 dirty counters
+Like 寫入 path（完整版）：
+  Client → API
+  1. SISMEMBER liked_by:{post_id} {user_id}  ← dedup (冷 post 時 fallback 查 DB)
+     已存在 → return (idempotent)
+  2. Produce to Kafka: {post_id, user_id, ts, action:like}
+     立刻回 200 給 client (optimistic UI)
+  3. Kafka consumer (async):
+     → INSERT INTO likes (post_id, user_id, ts)    ← 寫 source of truth
+     → INCR post_likes:{post_id}                    ← 更新 Redis counter
+     → SADD liked_by:{post_id} {user_id}            ← 更新 Redis Set
+  4. 每 30 秒批次 flush aggregate：
+     → 讀取 Redis dirty counters
      → UPDATE posts SET like_count = {value} WHERE post_id = {id}
-     → 一次 batch update 幾千筆
+     → 一次 batch update 幾千筆（注意：只更新 posts 彙總欄位，
+       likes 明細已經由 consumer 寫過了）
 
-Unlike path：
-  1. DECR post_likes:{post_id}
-  2. SREM liked_by:{post_id} {user_id}
+為什麼 INSERT 明細可行、UPDATE like_count 不可行？
+  ─ INSERT = 新 row，無 row lock 爭用，可 sharding、可 batch
+  ─ UPDATE like_count = 同一 row 的寫，viral post 上會 serialize
+  → Redis counter 只是為了讓「熱門 row 的彙總寫」變成每 30s 一次
+
+Unlike path：同構（produce 一個 action:unlike event）
 
 「我有沒有 like 過這則貼文？」：
-  → SISMEMBER liked_by:{post_id} {user_id} → O(1)
-  → 如果 Set 太大（百萬 likes），用 Bloom Filter 先擋
+  Hot post: SISMEMBER liked_by:{post_id} {user_id} → O(1) in Redis
+  Cold post: Set 已被 evict → SELECT 1 FROM likes WHERE post_id=? AND user_id=?
+             (likes 表有 composite index on (post_id, user_id))
+  超大 post (百萬 likes)：Set 記憶體太貴，改用 Bloom Filter
+             命中時 fallback 查 DB 確認（接受 ~1% false positive）
 ```
+
+**故障語意（必須能回答）：**
+- Redis counter 掉了：從 `posts.like_count` 重新 load；最多遺失「上次 flush 到 crash」的增量（≤ 30s）。用 AOF `everysec` + Sentinel failover 可再壓到 ≤ 1s。Kafka event log 也能 replay 補齊。
+- Redis Set 掉了：從 `likes` 表重建 `SELECT user_id FROM likes WHERE post_id = ?`；熱 post 重建後塞回 Redis，冷 post 不重建、走 DB fallback。
+- Like count 可容忍小誤差（社交場景差 10 個沒人會告你）。金融等嚴格場景不能這樣設計。
 
 ### Comment 系統
 
