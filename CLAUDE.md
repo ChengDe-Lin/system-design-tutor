@@ -66,8 +66,20 @@ Slash commands (`/project:trade-off`, `/project:confusion`, `/project:organize`)
   - **重新解釋一次**，不要只丟 "看 components/X.md"
   - 回答要 self-contained，不假設他記得上次講過的觀念
   - 可以在結尾補一句「這在 `<file>.md` 有完整版」當 reference
-  - 不要有「這我上次講過」的語氣
-- 如果能自然引用 `confusion_ledger` 的舊 entry（「上次你在 X 題也中過類似的坑」）可加深記憶連結，但要溫和不說教。
+
+### ⚠️ 重複盲區偵測 (MUST-DO, 不是 nice-to-have)
+
+**每次回答使用者的問題前，先掃一次 `assessments/confusion_ledger.md`**：如果當前問題 / misconception 和任何既有 entry 的「我的盲區」欄位重疊或類似，**必須在回答開頭明確標記**，讓使用者意識到這是重複犯的坑。
+
+格式範例：
+> 🔁 **重複盲區警告**：這是你第 N 次在「OLTP/OLAP 判斷」這類題目上卡住 (參考 confusion_ledger 2026-04-14 entry)。上次的核心正解是「看 dominant query pattern，不看資料形狀」——這次你的問題又落回了「看資料形狀 (append-only) 決定儲存」的慣性。
+
+提醒原則：
+- **不要溫和帶過**——重複犯錯需要被明確標記，這樣才能提升該觀念在長期記憶的權重
+- **直接點出次數 / 日期 / 舊 entry 的核心正解**，讓使用者對照現在的錯在哪
+- **但不是羞辱性的**——語氣是「教練提醒選手這個弱點又出現了」，而不是「你怎麼又錯」
+- 如果發現同一盲區被命中 ≥2 次，在該 confusion_ledger entry 加註「⚠️ 重複命中 N 次」標記，升級為高優先複習項目
+- 回答完問題後，照常更新 / 新增 confusion_ledger entry，並把重複次數寫進去
 
 ### 互動偏好
 
