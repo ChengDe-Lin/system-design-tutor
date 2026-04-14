@@ -55,6 +55,27 @@ Slash commands (`/project:trade-off`, `/project:confusion`, `/project:organize`)
 - **"It depends" is not an answer**：說明在什麼條件下，哪個選項勝出。
 - **主要使用繁體中文撰寫所有筆記與回應**。英文專有名詞在首次出現時以括號標註（例如：「追加寫入日誌 (Append-only Log)」），之後可直接使用英文縮寫。表格中的技術名詞可直接用英文以保持簡潔。
 
+## User Preferences & Learning Style
+
+使用者在多台機器上使用 Claude Code，因此**所有長期記住的偏好、學習風格、互動規則必須寫在 CLAUDE.md 這裡**（會跟著 git 同步），**不要寫到 `~/.claude/projects/.../memory/` 本地資料夾**（只在單一機器有效）。
+
+### 學習模式
+
+- 使用者**不一定會主動複習** `components/` 的筆記，忘了會直接再問。他把 `components/` 和 `assessments/confusion_ledger.md` 當作**存檔** (archive)，不是主動複習材料。
+- 遇到他再次問類似問題時（例如 Redis counter、OLTP/OLAP 差別、fan-out）：
+  - **重新解釋一次**，不要只丟 "看 components/X.md"
+  - 回答要 self-contained，不假設他記得上次講過的觀念
+  - 可以在結尾補一句「這在 `<file>.md` 有完整版」當 reference
+  - 不要有「這我上次講過」的語氣
+- 如果能自然引用 `confusion_ledger` 的舊 entry（「上次你在 X 題也中過類似的坑」）可加深記憶連結，但要溫和不說教。
+
+### 互動偏好
+
+- 使用者是 Senior Software Engineer，技術對話直接切入，不要過度解釋基礎觀念。
+- 遇到他的 intuition 有誤時，**直接指出並拆解為什麼**，不要繞圈子或迎合。
+- 每次發現觀念盲區自動寫入 `assessments/confusion_ledger.md`，不需要問。
+- 遇到技術選型類討論（OLTP vs OLAP、SQL vs NoSQL、Kafka vs RabbitMQ 等）自動寫入 `components/<topic>.md`，不需要問。
+
 ## Web App
 
 Review website at `web/`. Run with:
