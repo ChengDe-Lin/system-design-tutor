@@ -66,11 +66,13 @@
 | C4 | Proximity Service (Yelp) | Geohash vs QuadTree (static vs dynamic)、composite ranking | Database |
 | C5 | Stock Exchange | Matching engine、LMAX Disruptor、single-threaded 反模式 | — (打破所有分散式常規) |
 | C6 | Ad Serving | RTB auction、eCPM ranking、fraud detection | Cache, Rate Limiter |
+| C7 | **Payment Processor Internals** | Four-party model、Smart Routing、FX engine、Tokenization/PCI、Reconciliation at scale | Distributed Transactions, Database |
 
 ### Path C 學習建議
 - C1 你已經有了，review 即可
 - C5 非常特殊 — 它故意違反所有分散式系統原則，面試時能展示你的靈活度
 - C4 與 B1 (Uber) 形成對比：static vs dynamic geospatial，串起來理解效果很好
+- C7 一般面試是 C 級，但**面 fintech (Airwallex / Stripe / Adyen) 時升級為 🔴 A 級**——這是他們的核心產品。與 B3 (Payment System) 的差別：B3 是商家視角（用 Stripe API），C7 是 Processor 視角（做出 Stripe）
 
 ---
 
