@@ -85,6 +85,13 @@ Slash commands (`/project:trade-off`, `/project:confusion`, `/project:organize`)
 
 - 使用者是 Senior Software Engineer，技術對話直接切入，不要過度解釋基礎觀念。
 - 遇到他的 intuition 有誤時，**直接指出並拆解為什麼**，不要繞圈子或迎合。
+
+### 面試目標
+
+- **目標公司：Airwallex**（跨境支付 Payment Processor，Stripe 的競爭對手）。
+- Airwallex 的核心競爭力：跨境支付、多幣種帳戶、FX 換匯、Smart Routing。
+- 面試角度：不是「使用 Stripe API 的商家」，而是「設計 Stripe/Airwallex 內部架構的人」。
+- Payment 相關問題應該從 **Processor 視角**回答（Four-party model、Auth/Clearing/Settlement、Smart Routing、FX、PCI DSS scope 內），不是 Merchant 視角。
 - 每次發現觀念盲區自動寫入 `assessments/confusion_ledger.md`，不需要問。
 - 遇到技術選型類討論（OLTP vs OLAP、SQL vs NoSQL、Kafka vs RabbitMQ 等）自動寫入 `components/<topic>.md`，不需要問。
 
