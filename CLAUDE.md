@@ -47,6 +47,11 @@ Slash commands (`/project:trade-off`, `/project:confusion`, `/project:organize`)
 1. Show the current confusion ledger entries.
 2. Pick 2-3 entries and ask targeted questions to check retention.
 
+### 考試 / Mock Interview
+- 考試結果**必須存檔**到 `assessments/mock_exams.md`，包含：日期、考的題目、答對/答錯的點、弱項標記。
+- 下次考試前**先讀 `assessments/mock_exams.md`**，避免重複出一樣的題目。
+- 可以從 confusion_ledger 的重複命中項目出題，測試是否已修正。
+
 ## Rules of Engagement
 
 - **保持專業與精煉**：直接切入技術核心，不過度客套。
