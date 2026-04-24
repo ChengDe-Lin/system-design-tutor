@@ -93,10 +93,10 @@ Slash commands (`/project:trade-off`, `/project:confusion`, `/project:organize`)
 
 ### 面試目標
 
-- **目標公司：Airwallex**（跨境支付 Payment Processor，Stripe 的競爭對手）。
-- Airwallex 的核心競爭力：跨境支付、多幣種帳戶、FX 換匯、Smart Routing。
-- 面試角度：不是「使用 Stripe API 的商家」，而是「設計 Stripe/Airwallex 內部架構的人」。
-- Payment 相關問題應該從 **Processor 視角**回答（Four-party model、Auth/Clearing/Settlement、Smart Routing、FX、PCI DSS scope 內），不是 Merchant 視角。
+- **目標公司：Airwallex、Visa、Mastercard**（三家在四方模型中位置不同）。
+- **Airwallex**：PSP 層（跨境支付 Payment Processor，Stripe 競爭對手）。核心：Smart Routing、FX、Tokenization。Deep dive: `payment_processor_internals.md`。
+- **Visa / Mastercard**：Card Network 層（連接所有 issuer 和 acquirer 的網路）。核心：65K TPS 高吞吐、BIN routing、全球 clearing/settlement、multi-DC DR。Deep dive: `card_network_internals.md`。
+- Payment 相關問題應根據面試公司選擇視角：Airwallex → PSP 視角；Visa/MC → Card Network 視角。兩者關注點不同。
 - 每次發現觀念盲區自動寫入 `assessments/confusion_ledger.md`，不需要問。
 - 遇到技術選型類討論（OLTP vs OLAP、SQL vs NoSQL、Kafka vs RabbitMQ 等）自動寫入 `components/<topic>.md`，不需要問。
 

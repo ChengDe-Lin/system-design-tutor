@@ -67,12 +67,14 @@
 | C5 | Stock Exchange | Matching engine、LMAX Disruptor、single-threaded 反模式 | — (打破所有分散式常規) |
 | C6 | Ad Serving | RTB auction、eCPM ranking、fraud detection | Cache, Rate Limiter |
 | C7 | **Payment Processor Internals** | Four-party model、Smart Routing、FX engine、Tokenization/PCI、Reconciliation at scale | Distributed Transactions, Database |
+| C8 | **Card Network Internals** | 65K TPS in-memory processing、BIN routing、Clearing/Settlement netting、Multi-DC zero-data-loss DR、STIP | Fault Tolerance, Scalability |
 
 ### Path C 學習建議
 - C1 你已經有了，review 即可
 - C5 非常特殊 — 它故意違反所有分散式系統原則，面試時能展示你的靈活度
 - C4 與 B1 (Uber) 形成對比：static vs dynamic geospatial，串起來理解效果很好
 - C7 一般面試是 C 級，但**面 fintech (Airwallex / Stripe / Adyen) 時升級為 🔴 A 級**——這是他們的核心產品。與 B3 (Payment System) 的差別：B3 是商家視角（用 Stripe API），C7 是 Processor 視角（做出 Stripe）
+- C8 一般面試是 C 級，但**面 Card Network (Visa / Mastercard) 時升級為 🔴 A 級**——這是他們的網路本身。與 C7 的差別：C7 是 PSP 層（代商家跟 acquirer 溝通），C8 是 Network 層（連接所有 issuer 和 acquirer）
 
 ---
 
