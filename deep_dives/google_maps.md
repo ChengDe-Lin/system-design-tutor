@@ -260,11 +260,17 @@ A* with Euclidean heuristic：
   3. 結果：原圖 + 大量 shortcut edges，形成層級結構
 
 查詢 (Online, 毫秒級)：
-  Bidirectional search：
+  **Bidirectional Dijkstra**（不是 A*）：
     - 從起點向上（只走 rank 遞增的邊）
     - 從終點向上（只走 rank 遞增的邊）
     - 兩個搜尋在高層（高速公路層級）相遇
-    - 探索節點數：~500-2000（vs Dijkstra 的數百萬）
+    - 探索節點數：~500-2000（vs 原圖 Dijkstra 的數百萬）
+
+  為什麼不用 A*？
+    - CH 壓縮後搜尋空間只剩 ~800 節點，A* 的 heuristic 發揮不了作用
+    - Shortcut 會「跳過」大段距離，Euclidean heuristic 嚴重 underestimate → A* 退化
+    - CH 的預處理已經做了 A* 在 runtime 想做的事（剪枝不重要的節點）
+    - A* 適合「沒有預處理的原圖」；CH 後用 Bidirectional Dijkstra 更快
 
 效能：
   預處理時間: 數小時（全球路網）
@@ -276,46 +282,138 @@ A* with Euclidean heuristic：
 ```
 範例：台北 → 高雄
 
-Dijkstra：探索所有可能路徑，包含每條小巷弄
+Dijkstra（原圖）：探索所有可能路徑，包含每條小巷弄
   → 探索 ~2M 節點 → ~3 秒
 
-CH：
+A*（原圖 + Euclidean heuristic）：比 Dijkstra 好但仍慢
+  → 探索 ~200K-500K 節點 → 300ms-1s
+
+CH + Bidirectional Dijkstra：
   從台北向上搜尋 → 很快到達「國道一號入口」（高 rank 節點）
   從高雄向上搜尋 → 很快到達「國道一號出口」（高 rank 節點）
   高速公路層級只有 ~100 個節點 → 瞬間相遇
   → 探索 ~800 節點 → ~2 ms
+
+選擇路線圖：
+  能預處理嗎？
+  ├── YES → CH + Bidirectional Dijkstra（Google Maps）
+  └── NO（圖一直變 / 太小）
+        ├── 圖大（>100K 節點）→ A*
+        └── 圖小（<10K 節點）→ Dijkstra 就夠
+```
+
+### Customizable CH (CCH)：即時交通整合
+
+```
+CH 的問題：shortcut weight 在預處理時固定了
+  → 即時交通讓 edge weight 變動 → shortcut weight 可能不正確
+  → 完整重做 CH 要數小時 → 來不及
+
+CCH 的核心：把 CH 預處理拆成兩階段
+
+  階段 1：拓撲預處理 (Topology) — 離線，數小時，只做一次
+  ────────────────────────────────────────────
+    決定：每個節點的 rank + 哪些 shortcut 要建
+    CCH 比標準 CH 保守：為所有鄰居 pair 都建 shortcut（即使有些目前不需要）
+    → 不管 weight 怎麼變，正確的 shortcut 一定在裡面
+    → 多用一些記憶體，但 topology 永遠不用重算
+    
+    關鍵：記錄每個 shortcut 由哪些原始 edge 組成
+      shortcut(A→E) = 收縮 C 時建的，路徑 A→C→E
+      但 A→C 本身也是 shortcut = A→B→C
+      → 完整展開：A→B→C→E（存下這個 edge list）
+
+  階段 2：權重更新 (Customization) — 即時，每 5-15 分鐘，幾秒完成
+  ────────────────────────────────────────────
+    拿到最新的即時路況（每條 edge 的 current speed）
+    → 自底向上 (bottom-up) 重算每個 shortcut 的 weight：
+
+    Level 0（原始 edge，直接查 Traffic Store）：
+      weight(A→B) = 30km / 即時 60km/h = 30min
+      weight(B→C) = 20km / 即時 20km/h = 60min  ← 塞車！
+      weight(C→E) = 25km / 即時 100km/h = 15min
+
+    Level 1（第一層 shortcut）：
+      weight(A→C) = weight(A→B) + weight(B→C) = 30 + 60 = 90min
+
+    Level 2（第二層 shortcut）：
+      weight(A→E) = weight(A→C) + weight(C→E) = 90 + 15 = 105min
+
+    → 整體是一次 bottom-up DAG 走訪，O(shortcut 總數)
+    → 不需要重新跑 Dijkstra 決定 shortcut 結構（topology 已固定）
+    → 全球幾億個 shortcut → 幾秒~幾分鐘完成
+
+  階段 3：查詢 — 每次 user request，~2ms
+  ────────────────────────────────────────────
+    Bidirectional Dijkstra on CCH graph（用更新過的 weights）
+    → priority queue 看到的就是即時路況
+    → 塞車路段的 shortcut weight 變大 → priority queue 自然不選它
+    → 自動走替代路線
+
+  CCH 保守建 shortcut 的效果：
+    例：台北→台中有國道一號和國道三號
+    標準 CH：可能只建國道一號的 shortcut（預處理時它更快）
+    CCH：兩條都建 shortcut
+    → 國道一號塞車 → shortcut weight 180min
+    → 國道三號順暢 → shortcut weight 105min
+    → Bidirectional Dijkstra 自動選國道三號 ✓
 ```
 
 ### CH 的 Trade-off
 
-| 維度 | 值 |
-|------|-----|
-| 預處理時間 | 2-6 小時（全球路網） |
-| 額外儲存 | 原圖 2-3 倍（~200-300 GB shortcut edges） |
-| 查詢 latency | **1-5 ms** |
-| 即時交通整合 | **困難**（edge weight 變了 → shortcut 要重算） |
-| 更新頻率 | 每 5-15 分鐘局部更新 or 每日全量重建 |
+| 維度 | 標準 CH | Customizable CH (CCH) |
+|------|--------|----------------------|
+| 拓撲預處理 | 數小時（weight-dependent） | 數小時（weight-independent，只做一次） |
+| Weight 更新 | 要重跑整個預處理（小時） | **底部向上重算（秒~分鐘）** |
+| 額外儲存 | 原圖 2-3 倍 | 原圖 3-4 倍（保守多建 shortcut） |
+| 查詢 latency | 1-5 ms | 1-5 ms |
+| 即時交通 | 困難 | **每 5-15 分鐘更新一次 weight** |
 
 ### 圖分割 (Graph Partitioning)
 
 ```
-互補策略：將全球路網分割成數千個區域 (partition)
+與 CH 的關係：正交互補，解決不同問題
 
-預處理：
-  1. 把路網切成 ~5000 個 partition（每個 ~20 萬節點）
-  2. 預計算所有「邊界節點」(boundary node) 之間的最短路徑
-     → 邊界節點：連接兩個 partition 的交叉口
-     → 每個 partition 邊界 ~100 個節點 → 100×100 = 10K 條預計算路徑
+  CH = 重要性維度（壓縮搜尋空間 → 查詢變快）
+  Graph Partitioning = 地理維度（拆圖 → 單機放得下 / 可分散部署）
 
-查詢：
-  1. 起點所在 partition 內：用局部 Dijkstra 算到邊界
-  2. 跨 partition：查預計算的邊界-邊界最短路徑表
-  3. 終點所在 partition 內：用局部 Dijkstra 算從邊界到終點
+  不是上下層關係，是兩個可以同時使用的獨立策略。
 
-好處：
-  - partition 內節點少 → Dijkstra 夠快
-  - 跨 partition 直接查表 → O(1)
-  - 交通更新只需重算受影響的 partition → 比 CH 更容易局部更新
+為什麼不能只用其中一個？
+  只用 CH，不 Partition：全球 300GB 全放一台 → 要 512GB+ RAM → 昂貴
+  只用 Partition，不 CH：每個 partition 用 Dijkstra → 仍慢
+  兩者合用：Partition 讓單機 graph 變小 + CH 讓查詢極快 → 最佳組合
+
+  實務選擇：
+    Google Maps → 全圖 replica + CH（靠大 RAM 機器暴力解）
+    小公司 / OSRM → Partition + CH（省成本）
+
+合用架構：
+  ┌──────────────────────────────────────────┐
+  │ 全球路網 (10 億節點)                       │
+  │                                          │
+  │  Step 1: Graph Partitioning（按地理切）    │
+  │  ┌──────┐ ┌──────┐ ┌──────┐              │
+  │  │台灣   │ │日本   │ │美國   │ ...          │
+  │  │5M node│ │20M   │ │200M  │              │
+  │  └───┬───┘ └───┬───┘ └───┬───┘             │
+  │      ↓         ↓         ↓                 │
+  │  Step 2: 每個 partition 內做 CH             │
+  │  CH(台灣)  CH(日本)  CH(美國)               │
+  │                                          │
+  │  Step 3: 邊界節點組成 overlay graph         │
+  │  overlay graph 也做 CH                     │
+  └──────────────────────────────────────────┘
+
+查詢（同 partition）：
+  台北 → 高雄 → 只在 CH(台灣) 上跑 → 單機 → ~2ms
+
+查詢（跨 partition）：
+  台北 → 東京
+  1. CH(台灣) 找到台北 → 桃園機場（邊界節點）
+  2. Overlay CH 找到桃園 → 成田（跨區）
+  3. CH(日本) 找到成田 → 東京
+  → 三段拼接
 ```
 
 ---
@@ -369,25 +467,24 @@ Traffic Tile：
 ### 交通感知路徑規劃
 
 ```
-Route Query with live traffic：
+Route Query with live traffic（使用 CCH）：
 
-1. 用 CH 算出「靜態最短路徑」（基於速限的理想時間）
-2. 對路徑上的每條 edge，查 Traffic Store 取得即時速度
-3. 計算即時 ETA = Σ (edge_length / live_speed)
-4. 如果即時 ETA 比靜態 ETA 差 > 20%，嘗試備選路徑
+1. CCH 的 shortcut weights 已經每 5-15 分鐘由 customization 階段更新
+   → 反映即時路況
+2. 查詢時直接跑 Bidirectional Dijkstra on CCH → 路線已包含即時路況
+3. 對路線上每條 edge 再查一次 Traffic Store 最新速度 → 算精確 ETA
+4. 如果精確 ETA >> CCH 預估（差 >20%）→ 嘗試備選路徑
 
 備選路徑 (Alternative Routes)：
-  - 用 CH + penalty 方法：把主路徑的邊加高權重 → 重算 → 得到繞路方案
+  - 用 CCH + penalty 方法：把主路徑的邊加高權重 → 重算 → 得到繞路方案
   - 通常提供 2-3 條備選路徑
   - 各路徑附上即時 ETA 讓使用者選擇
 
-挑戰：CH 的 shortcut edges 假設 weight 固定
-  → 即時交通讓 weight 變動 → shortcut 可能不正確
-  → 解法：
-    a) Customizable CH：預處理時記錄 shortcut 的原始邊列表
-       → 查詢時用即時權重重新計算 shortcut weight
-    b) 定期局部重建：每 5-15 分鐘對交通變化大的區域重建 CH
-    c) Hybrid：CH 給粗略路徑 → 局部 Dijkstra 用即時權重微調
+兩層即時交通整合：
+  Layer 1: CCH shortcut weights 每 5-15 分鐘全量更新（反映中期路況）
+  Layer 2: 查詢結果再疊加最新 edge speed（補上 5 分鐘內的突發狀況）
+  → Layer 1 保證路線大方向正確
+  → Layer 2 保證 ETA 精確 + 偵測突發需要 re-route 的情況
 ```
 
 ---
