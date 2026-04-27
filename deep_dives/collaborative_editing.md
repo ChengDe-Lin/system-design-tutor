@@ -652,9 +652,32 @@ OT 的處理：
   tie-breaking 規則用 user_id 決定誰的字在前面
   → 確保所有 client 最終順序一致
 
-CRDT 的處理：
-  每個字元有 unique ID → 用 ID 做排序
-  → 不需要特殊處理，merge 自動決定順序
+CRDT 的處理（以 Yjs / YATA 為例）：
+  每個字元 item 帶 ID = (clientID, clock)，並標記 origin_left / origin_right (相鄰字元 ID)
+  ID 永遠不會「相同」（clientID 是 32-bit random + clock 單調遞增）
+
+  ⚠️ 但 ID 不同不代表「沒衝突」——相對位置可能完全一樣：
+    Client X 插 'P': origin_left=A_id, origin_right=B_id
+    Client Y 插 'Q': origin_left=A_id, origin_right=B_id  ← 標記一模一樣
+
+  Tie-break 規則 (YATA)：
+    當兩個 item 的 origin 相同 → 比較 clientID 數值，小的排前面
+    → 若 X_clientID=1001 < Y_clientID=2002，最終: A — P — Q — B
+    → 兩個 replica 看到同樣的 items，獨立算出同樣順序，無需協調
+
+  關鍵 insight：
+    CRDT 不是「自動沒衝突」，是「衝突的解決邏輯內建在 ID 的 total order 規則裡」
+    這個規則 deterministic → 任何 client 看到同樣 op 集合都收斂到同樣狀態
+    → 這才是 P2P 不需要中央 server 的真正原因
+
+  其他 CRDT 演算法的 tie-break：
+    RGA: timestamp + replica ID
+    Logoot/LSEQ: fractional ID (連續實數空間，新位置取中點)
+    Treedoc: binary tree path + replica ID
+
+  邊界情況：clientID 碰撞？
+    Yjs 32-bit random 有 1/2^32 碰撞機率，10K clients 約 0.001%
+    生產建議：server 派發 clientID（避免 random）或用 UUID（Automerge）
 ```
 
 ### Q: 文件很大（1000 頁）怎麼優化？
