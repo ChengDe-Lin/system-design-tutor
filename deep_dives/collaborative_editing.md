@@ -606,17 +606,33 @@ Op Log 儲存策略：
 
 ## 13. 關鍵 Trade-off 總結
 
-| 設計決策 | 選擇 | 原因 |
-|---------|------|------|
-| 衝突解決演算法 | **OT（Google Docs）** | Server-authoritative，強一致，metadata overhead 低；<50 concurrent editors 時 transform 成本低 |
-| Client 策略 | **Optimistic Local Apply** | 打字必須 < 50ms 回饋，不能等 server RTT（50-150ms） |
-| 即時通訊協議 | **WebSocket** | 雙向、低 latency；HTTP polling 的 overhead 太高（每秒 5-10 次操作） |
-| 文件儲存 | **Op Log + Periodic Snapshot** | Op Log 保留完整歷史可 replay；Snapshot 避免載入時從頭 replay |
-| Snapshot 頻率 | **每 100 ops** | 平衡載入速度（最多 replay 100 ops）和儲存空間 |
-| 游標同步 | **Throttled broadcast（100ms）** | 減少 80% 訊息量，人眼分辨不出 100ms 差異 |
-| 權限檢查 | **每次 op 都檢查 + Redis cache** | 安全性要求：每個操作都必須驗證；cache 避免 DB 成為瓶頸 |
-| 離線支持（OT） | **有限支持 + reconnect transform** | OT 天生不適合長時間離線；如果離線是核心需求，選 CRDT |
-| 大規模連線 | **Sticky Session + Redis Pub/Sub** | 同一 doc 的 editors 盡量在同一 Gateway 減少跨節點通訊 |
+> ⚠️ 以下決策的 **適用前提**：Google Docs 規模、server-mediated（非 P2P）、online-primary（離線非核心需求）、大文件（多達 1000 頁）。
+> 如果你的需求落在不同的條件，每一行的「選擇」都會翻過來——見最右欄。
+
+| 設計決策 | 本設計的選擇 | 原因 | 條件變了會怎樣 |
+|---------|------|------|----------------|
+| **衝突解決演算法** | **OT** | Server-authoritative，強一致；metadata overhead 低（每 op 只有 type + position，不像 CRDT 每字元都要 unique ID + tombstone）；<50 concurrent editors 時 transform 成本低；Google Docs 大文件選 CRDT 會記憶體爆炸 | **離線優先 / P2P / 用 library 自建** → 改選 **CRDT (Yjs / Automerge)**。Figma、Linear、Notion (hybrid) 走這條 |
+| Client 策略 | Optimistic Local Apply | 打字必須 < 50ms 回饋，不能等 server RTT（50-150ms） | （無論 OT/CRDT 都用這個，是 UX 鐵律） |
+| 即時通訊協議 | WebSocket | 雙向、低 latency；HTTP polling 的 overhead 太高（每秒 5-10 次操作） | 純單向通知 → SSE；P2P CRDT → WebRTC DataChannel |
+| 文件儲存 | Op Log + Periodic Snapshot | Op Log 保留完整歷史可 replay；Snapshot 避免載入時從頭 replay | CRDT 改用 **state-based** 儲存（直接存 CRDT 整個 state，不用 op log replay） |
+| Snapshot 頻率 | 每 100 ops | 平衡載入速度（最多 replay 100 ops）和儲存空間 | 文件越大越要頻繁 snapshot；CRDT 每次 commit state 即可 |
+| 游標同步 | Throttled broadcast（100ms） | 減少 80% 訊息量，人眼分辨不出 100ms 差異 | OT 用 `transform_cursor(int_pos, op)`；CRDT 用 `RelativePosition`（anchor 到 char ID），不需 transform |
+| 權限檢查 | 每次 op 都檢查 + Redis cache | 安全性要求：每個操作都必須驗證；cache 避免 DB 成為瓶頸 | P2P 場景需端到端加密 (E2EE) + 客戶端權限驗證 |
+| 離線支持 | **有限支持 + reconnect transform** | OT 天生不適合長時間離線（重連時積壓 ops 太多 transform 失敗率高） | **離線是核心需求** → 必須換 CRDT，沒有第二條路 |
+| 大規模連線 | Sticky Session + Redis Pub/Sub | 同一 doc 的 editors 盡量在同一 Gateway 減少跨節點通訊 | P2P 模式不需要 Gateway，但需要 signaling server 做 peer discovery |
+
+### 「選 OT 還是 CRDT」的決策快查
+
+| 你的條件 | 該選 |
+|---------|------|
+| 中央 server + online primary + 大文件 (>100 頁) | **OT** (Google Docs 路線) |
+| 離線優先 / 行動 app / 同步間隔可能數小時 | **CRDT** |
+| P2P (無中央 server) | **CRDT** (OT 沒辦法) |
+| 不想自己寫 transform 函數正確性證明 | **CRDT** + Yjs library |
+| Rich text 結構複雜（table、巢狀 list） | OT 較成熟（CRDT 可做但麻煩） |
+| 設計檔 / 白板 / 圖形編輯（Figma） | **CRDT** (object-level 無位置概念) |
+
+→ 完整 decision tree 見 §4。**這份設計選 OT 是因為「Google Docs 規模、強一致、大文件、線上為主」這四個條件全中**，不是 OT 客觀比 CRDT 好。
 
 ---
 
