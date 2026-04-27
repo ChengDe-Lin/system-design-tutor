@@ -378,11 +378,26 @@ Compaction（壓縮）：
   2. Server 透過 WebSocket 廣播給同一 doc 的其他 clients
   3. 其他 clients 在 UI 上顯示 A 的游標（帶名字標籤 + 顏色）
 
-關鍵問題：游標位置也需要 transform！
+關鍵問題：游標位置如何在併發編輯下保持正確？
   User A 的游標在位置 5
   User B 在位置 2 插入一個字元
   → A 的游標應該自動變成位置 6（因為前面多了一個字元）
-  → 跟 OT transform 一樣的邏輯
+
+  OT 解法：transform 游標座標
+    游標 = integer index → 收到 remote op 時跑 transform_cursor(pos, op)
+    跟 transform 文件 op 是同一套邏輯，O(N²) pair
+
+  CRDT 解法：根本沒有 transform 這回事
+    游標 = anchor 在某個 char 的 globally unique ID 之後
+    Doc: [1@A:"A", 2@A:"B", 3@A:"C", 4@A:"D", 5@A:"E"]
+    A 的 cursor = "在 5@A 之後"  ← 存的是 ID，不是 index
+    B 插入後: [1@A, 2@A, 1@B:"X", 3@A, 4@A, 5@A]
+    A 的 anchor 5@A 還在，render 時 lookup 它的 visual index = 6 ✓
+    → Yjs 的 RelativePosition / Automerge 的 cursor API 就是這個
+
+  Edge case (CRDT)：
+    別人刪了我 anchor 的字元 → anchor 變 tombstone → fallback 到下一個活字元
+    Range selection → start 和 end 兩個 anchor 獨立，遠離中間插入會自動擴張
 
 頻率控制：
   打字時游標每秒移動 5-10 次
@@ -390,6 +405,19 @@ Compaction（壓縮）：
   → 或用 debounce：停止移動後 50ms 才發送
   → 減少 ~80% 的游標更新訊息
 ```
+
+### OT vs CRDT cursor 對照
+
+| 維度 | OT | CRDT |
+|------|----|----|
+| Cursor 內部表示 | `int index` | `RelativePosition`（指向某個 char ID） |
+| 收到 remote op 時 | 手寫 `transform_cursor(pos, op)` | **不需要做事**（render 時 lookup ID） |
+| Range selection 處理 | 兩個端點各做 transform | 兩個 anchor 獨立，range 自動擴縮 |
+| 邏輯成本 | O(N²) pair transform | O(1) anchor lookup |
+| Anchor 被刪時 | 自然處理 | 需要 tombstone + neighbor fallback |
+| 離線重連 | 大量 transform catch-up | anchor 還在，無事 |
+
+**核心 insight**：OT 把位置當「絕對座標 (index)」，所以前面的編輯一改，座標就要修；CRDT 把位置當「相對 anchor (char ID)」，anchor 不會被別人動到，所以座標自動對。這不是「CRDT 比較聰明」——是兩套**位置語意**從根本不同。
 
 ---
 
