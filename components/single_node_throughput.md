@@ -89,7 +89,57 @@
 
 數字是純 hello-world 等級，加上 DB call / JSON parse / auth 會降 5-10x。
 
-## 8. 網路硬體極限 (絕對天花板)
+## 8. Long-lived Connection (WebSocket / SSE / long polling)
+
+長連線系統的「per-node 容量」**不是 QPS**，是**同時在線連線數**。瓶頸跟 stateless API 完全不同。
+
+| 服務 | 單機連線數 | 備註 |
+|------|----------|------|
+| **典型 Go / Node.js WebSocket server** | **10K-100K** | 一般調優，idle-heavy workload |
+| Java / Spring WebFlux | 50K-200K | Netty-based，event loop |
+| **Erlang/Elixir (Phoenix)** | **500K-2M** | Discord ~25K/server 保守設定，WhatsApp 2012 做到 2M |
+| Rust (tokio + axum) | 100K-500K | 接近 Erlang 等級 |
+| Nginx (做 WebSocket proxy) | 100K-500K | 純 proxy 不處理應用邏輯 |
+
+### 怎麼推導「單機 N 條連線」
+
+四個瓶頸依序檢查（**永遠是記憶體最先撞牆**）：
+
+**(1) 記憶體**：每條 idle WebSocket 約 **30-50 KB**
+- Linux kernel TCP buffer (`tcp_rmem` + `tcp_wmem`)：20-30 KB（可調到 4-8 KB）
+- WS 框架 state (heartbeat、frame parser)：2-5 KB
+- 應用層 session (user_id、subscriptions)：2-10 KB
+- → 100K × 40 KB ≈ 4 GB RAM；極端調優可壓到 10 KB/conn → 1M conn 需要 10 GB
+
+**(2) File Descriptor**：1 conn = 1 FD，預設 `ulimit -n = 1024`
+- 必須調到 1M+（`/etc/security/limits.conf`）
+- **這是設定問題不是物理極限**
+
+**(3) Port**（破解迷思）：server **不受 65535 port 限制**
+- TCP 連線是 4-tuple: `(src_ip, src_port, dst_ip, dst_port)`
+- Server 監聽單一 port，不同 client 的 `(src_ip, src_port)` 區分，理論無限
+- 只有 outbound 主動連別人時才受 ephemeral port range 限制
+
+**(4) CPU**：idle 不耗，**活躍訊息才耗**
+- Idle 連線只有 30s 一次 heartbeat，CPU ~0
+- 100K conn × 每秒 1 則訊息 = 100K msg/sec → 單核接近極限
+- 100K conn × 每分鐘 1 則訊息 = 1.7K msg/sec → 毫無壓力
+
+### 估算範例：Slack 規模
+
+需求：5M 同時在線，平均 10s 一則訊息
+
+- **記憶體**：5M × 40 KB = 200 GB → 7 台 32GB（buffer 開 10 台）
+- **訊息**：5M / 10s = 500K msg/sec → 單機 50K msg/sec → 需要 10+ 台
+- **取交集**：50 台 × 100K conn（保守，方便 rolling deploy）
+
+### 引用 WS 容量的鐵律
+
+- **「100K conn / node」是 idle-heavy workload 的 anchor**，活躍訊息高的場景（即時遊戲、股價推送）可能只剩 10-20K
+- **永遠分開講「連線數」和「訊息率」**，混為一談量級會錯
+- **VM 配置先估記憶體，再估 CPU**——記憶體幾乎一定先撞牆
+
+## 9. 網路硬體極限 (絕對天花板)
 
 | 規格 | 吞吐 | 備註 |
 |------|------|------|
