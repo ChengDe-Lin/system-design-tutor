@@ -193,8 +193,9 @@ Tweet Service
          │
          ▼
     Fan-out Workers（consume from Kafka）
-      1. 查 Social Graph：follower list of tweet author
-      2. 過濾：follower 是明星？→ 跳過（fan-out on read）
+      1. 判斷 tweet author 是否明星（followers > threshold）
+         → 是：不做 bulk fan-out；讀 timeline 時再拉取/merge 這位 author 的 tweets
+      2. 查 Social Graph：follower list of tweet author
       3. 對每個 follower：LPUSH + LTRIM 到 Redis timeline
       4. 通知 Notification Service（@mention, reply 等）
 ```
